@@ -82,6 +82,8 @@ func main() {
 		MaxIterations:      cfg.Agent.MaxIterations,
 		MaxRepeatToolCalls: cfg.Agent.MaxRepeatToolCalls,
 		MaxContextBytes:    cfg.Agent.MaxContextBytes,
+		Temperature:        cfg.LLM.Temperature,
+		MaxTokens:          cfg.LLM.MaxTokens,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -23,7 +23,7 @@ func TestExtractToolCallJSONForm(t *testing.T) {
 
 func TestExtractFunctionForm(t *testing.T) {
 	msg := &llm.Message{
-		Role: "assistant",
+		Role:    "assistant",
 		Content: "checking\n<function=read_file>\n{\"path\": \"main.go\"}\n</function>\n",
 	}
 	calls := extractTextToolCalls(msg)
@@ -74,5 +74,20 @@ func TestExtractSkipsWhenStructuredCallsExist(t *testing.T) {
 	}
 	if calls := extractTextToolCalls(msg); calls != nil {
 		t.Errorf("structured tool_calls take precedence, got %+v", calls)
+	}
+}
+
+func TestStripThinkBlocks(t *testing.T) {
+	cases := map[string]string{
+		"<think>reasoning</think>The answer.":                 "The answer.",
+		"prefix <think>a</think> mid <think>b</think> suffix": "prefix  mid  suffix",
+		"answer <think>unterminated":                          "answer",
+		"plain text":                                          "plain text",
+		"stray </think> tag":                                  "stray  tag",
+	}
+	for in, want := range cases {
+		if got := stripThinkBlocks(in); got != want {
+			t.Errorf("stripThinkBlocks(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

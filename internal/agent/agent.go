@@ -5,10 +5,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"local-codex/internal/llm"
 	"local-codex/internal/logging"
@@ -27,6 +30,14 @@ type Agent struct {
 	MaxIterations      int
 	MaxRepeatToolCalls int
 	MaxContextBytes    int
+
+	// Temperature and MaxTokens are forwarded to every chat request when
+	// set (zero values are omitted, leaving the server defaults).
+	Temperature *float64
+	MaxTokens   int
+
+	// retryBackoff is the initial retry delay; tests shrink it.
+	retryBackoff time.Duration
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -58,7 +69,8 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, task string) (st
 
 	var lastSig string
 	repeatCount := 0
-	warned := false
+	warned := map[string]bool{}
+	sigTotals := map[string]int{}
 
 	for iter := 1; iter <= maxIter; iter++ {
 		if err := ctx.Err(); err != nil {
@@ -78,6 +90,11 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, task string) (st
 		if msg == nil {
 			return "", fmt.Errorf("llm returned empty response (iteration %d)", iter)
 		}
+		// Drop thinking-model reasoning so it never bloats the history or
+		// leaks into the final answer; also drop server-side reasoning
+		// fields before the message is stored.
+		msg.Content = stripThinkBlocks(msg.Content)
+		msg.ReasoningContent = ""
 		// Recover tool calls the model emitted as text markup instead of
 		// structured tool_calls (common with local models).
 		if recovered := extractTextToolCalls(msg); recovered != nil {
@@ -109,31 +126,38 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, task string) (st
 				Data: map[string]any{"content": msg.Content}})
 		}
 
-		for _, call := range msg.ToolCalls {
-			sig := call.Function.Name + "\x00" + call.Function.Arguments
+		for i, call := range msg.ToolCalls {
+			sig := callSignature(call)
 			if sig == lastSig {
 				repeatCount++
 			} else {
 				repeatCount = 0
-				warned = false
 			}
 			lastSig = sig
+			sigTotals[sig]++
 
-			if repeatCount >= maxRepeat {
-				if warned {
-					err := fmt.Errorf("agent stuck repeating tool %q %d times; aborting", call.Function.Name, repeatCount)
-					a.emit(logging.Event{Type: "error", SessionID: sess.ID, Iteration: iter,
-						Success: boolPtr(false), Data: map[string]any{"error": err.Error()}})
-					return "", err
-				}
-				warned = true
-				nudge := fmt.Sprintf("You have repeated the exact same tool call %q %d times. Do NOT repeat it again; change your approach or finish the task.",
-					call.Function.Name, repeatCount+1)
-				sess.AppendMessage(llm.Message{Role: "user", Content: nudge})
-				break
+			if repeatCount < maxRepeat && sigTotals[sig] < maxTotalRepeatToolCalls {
+				a.executeToolCall(ctx, sess, iter, call)
+				continue
 			}
 
-			a.executeToolCall(ctx, sess, iter, call)
+			// Pair every unexecuted tool_call with a synthetic tool result;
+			// leaving dangling tool_calls in the history makes strict
+			// OpenAI-compatible servers (vLLM etc.) reject the next
+			// request with a 400.
+			appendSkippedToolResults(sess, msg.ToolCalls[i:])
+
+			if warned[sig] {
+				err := fmt.Errorf("agent stuck repeating tool %q %d times; aborting", call.Function.Name, sigTotals[sig])
+				a.emit(logging.Event{Type: "error", SessionID: sess.ID, Iteration: iter,
+					Success: boolPtr(false), Data: map[string]any{"error": err.Error()}})
+				return "", err
+			}
+			warned[sig] = true
+			nudge := fmt.Sprintf("You have repeated the exact same tool call %q %d times. Do NOT repeat it again; change your approach or finish the task.",
+				call.Function.Name, sigTotals[sig])
+			sess.AppendMessage(llm.Message{Role: "user", Content: nudge})
+			break
 		}
 	}
 
@@ -143,12 +167,47 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, task string) (st
 	return "", err
 }
 
+// maxTotalRepeatToolCalls caps how often the same (normalized) tool call
+// may appear across the whole task, even if not consecutive.
+const maxTotalRepeatToolCalls = 5
+
+// callSignature identifies a tool call for repeat detection. Arguments are
+// normalized (JSON key order and whitespace canonicalized) so a trivially
+// reformatted call cannot bypass the repeat guard.
+func callSignature(call llm.ToolCall) string {
+	args := call.Function.Arguments
+	var v any
+	if err := json.Unmarshal([]byte(args), &v); err == nil {
+		if norm, err := json.Marshal(v); err == nil {
+			args = string(norm)
+		}
+	}
+	return call.Function.Name + "\x00" + args
+}
+
+// appendSkippedToolResults appends a synthetic tool result for every call,
+// keeping the tool_call/tool_result pairing intact.
+func appendSkippedToolResults(sess *session.Session, calls []llm.ToolCall) {
+	for _, call := range calls {
+		sess.AppendMessage(llm.Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Name:       call.Function.Name,
+			Content:    "skipped: repeated tool call aborted",
+		})
+	}
+}
+
 // chatWithRetry calls the LLM, retrying transient failures (connection
-// resets, EOF, 5xx from an overloaded local server) with exponential
-// backoff. Context cancellation is never retried.
+// resets, EOF, 429 and 5xx from an overloaded local server) with
+// exponential backoff. Deterministic 4xx errors fail immediately, and
+// context cancellation is never retried.
 func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, iter int, sessionID string) (*llm.ChatResponse, time.Duration, error) {
 	const maxAttempts = 4
-	backoff := time.Second
+	backoff := a.retryBackoff
+	if backoff <= 0 {
+		backoff = time.Second
+	}
 	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -156,8 +215,10 @@ func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, iter 
 			return nil, time.Since(start), err
 		}
 		resp, err := a.LLM.Chat(ctx, llm.ChatRequest{
-			Messages: messages,
-			Tools:    a.Registry.Definitions(),
+			Messages:    messages,
+			Tools:       a.Registry.Definitions(),
+			Temperature: a.Temperature,
+			MaxTokens:   a.MaxTokens,
 		})
 		if err == nil {
 			return resp, time.Since(start), nil
@@ -166,23 +227,42 @@ func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, iter 
 			return nil, time.Since(start), err // request was cancelled: don't retry
 		}
 		lastErr = err
+		retry := retryableErr(err)
 		a.emit(logging.Event{Type: "error", SessionID: sessionID, Iteration: iter,
 			Success: boolPtr(false),
 			Data: map[string]any{
 				"error":   err.Error(),
 				"attempt": attempt,
-				"retry":   attempt < maxAttempts,
+				"retry":   retry && attempt < maxAttempts,
 			}})
+		if !retry {
+			return nil, time.Since(start), err
+		}
 		if attempt < maxAttempts {
+			delay := backoff
+			var httpErr *llm.HTTPError
+			if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
+				delay = httpErr.RetryAfter
+			}
 			select {
 			case <-ctx.Done():
 				return nil, time.Since(start), ctx.Err()
-			case <-time.After(backoff):
+			case <-time.After(delay):
 			}
 			backoff *= 2
 		}
 	}
 	return nil, time.Since(start), fmt.Errorf("llm failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// retryableErr reports whether the failure is worth retrying: network
+// errors and 429/5xx are transient; other 4xx are deterministic.
+func retryableErr(err error) bool {
+	var httpErr *llm.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= 500
+	}
+	return true
 }
 
 // executeToolCall runs one tool call, appends the result to the session and
@@ -232,14 +312,17 @@ func (a *Agent) buildMessages(sess *session.Session) []llm.Message {
 	history := sess.SnapshotMessages()
 	messages := make([]llm.Message, 0, len(history)+1)
 	messages = append(messages, llm.Message{Role: "system", Content: SystemPrompt})
-	messages = append(messages, history...)
+	for _, m := range history {
+		m.ReasoningContent = "" // never send reasoning back to the server
+		messages = append(messages, m)
+	}
 
 	budget := a.MaxContextBytes
 	if budget <= 0 {
 		budget = 200_000
 	}
 	if contextBytes(messages) > budget {
-		sess.ReplaceMessages(shrinkHistory(history, budget- len(SystemPrompt)))
+		sess.ReplaceMessages(shrinkHistory(history, budget-len(SystemPrompt)))
 		history = sess.SnapshotMessages()
 		messages = append([]llm.Message{{Role: "system", Content: SystemPrompt}}, history...)
 	}
@@ -268,7 +351,7 @@ func shrinkHistory(history []llm.Message, budget int) []llm.Message {
 			if i < 2 || history[i].Role != "tool" || len(history[i].Content) <= keepTail {
 				continue
 			}
-			history[i].Content = history[i].Content[:keepTail] +
+			history[i].Content = truncateUTF8(history[i].Content, keepTail) +
 				"\n...(older tool output truncated to bound context size)"
 			shrank = true
 			if contextBytes(history) <= budget {
@@ -298,6 +381,18 @@ func extractPatchPaths(argsJSON string) []string {
 		paths = append(paths, strings.TrimSpace(m[1]))
 	}
 	return paths
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a multi-byte
+// UTF-8 character.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func truncateStr(s string, n int) string {

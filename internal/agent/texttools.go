@@ -82,6 +82,23 @@ func extractTextToolCalls(msg *llm.Message) []llm.ToolCall {
 	return calls
 }
 
+var thinkBlockRe = regexp.MustCompile("(?s)<think>.*?</think>")
+
+// stripThinkBlocks removes <think>...</think> reasoning blocks emitted by
+// thinking models (qwen3 etc.), including an unterminated trailing block,
+// so reasoning text never bloats the history or leaks into final answers.
+func stripThinkBlocks(s string) string {
+	if !strings.Contains(s, "<think>") && !strings.Contains(s, "</think>") {
+		return s
+	}
+	s = thinkBlockRe.ReplaceAllString(s, "")
+	if i := strings.Index(s, "<think>"); i >= 0 {
+		s = s[:i] // unterminated trailing block
+	}
+	s = strings.ReplaceAll(s, "</think>", "")
+	return strings.TrimSpace(s)
+}
+
 func buildCall(name, args string, idx int) (llm.ToolCall, bool) {
 	args = strings.TrimSpace(args)
 	if args == "" {

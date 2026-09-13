@@ -10,9 +10,26 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// HTTPError is a non-200 response from the chat completions endpoint. It
+// lets callers distinguish deterministic 4xx failures (do not retry) from
+// transient 429/5xx ones.
+type HTTPError struct {
+	StatusCode int
+	Status     string
+	Body       string
+	// RetryAfter is parsed from the Retry-After header when present
+	// (typically on 429 responses).
+	RetryAfter time.Duration
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("chat completions returned %s: %s", e.Status, e.Body)
+}
 
 // OpenAIClient talks to any OpenAI-compatible /v1/chat/completions endpoint.
 type OpenAIClient struct {
@@ -23,14 +40,18 @@ type OpenAIClient struct {
 }
 
 // NewOpenAIClient builds a client. baseURL may include or omit a trailing
-// "/v1"; the chat completions path is appended accordingly.
+// "/v1"; when omitted it is appended before the chat completions path.
 //
 // LLM endpoints are typically local (localhost / LAN), so requests to
 // loopback or private addresses bypass any configured HTTP proxy — a proxy
 // that cannot reach the LAN would otherwise break the client with 502s.
 func NewOpenAIClient(baseURL, apiKey, model string) *OpenAIClient {
+	base := strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
 	return &OpenAIClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: base,
 		apiKey:  apiKey,
 		model:   model,
 		http: &http.Client{
@@ -95,8 +116,17 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse
 		return nil, fmt.Errorf("read chat response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("chat completions (%s) returned %s: %s",
-			c.baseURL, resp.Status, truncate(string(respBody), 500))
+		httpErr := &HTTPError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       truncate(string(respBody), 500),
+		}
+		if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+				httpErr.RetryAfter = time.Duration(secs) * time.Second
+			}
+		}
+		return nil, httpErr
 	}
 
 	var out ChatResponse

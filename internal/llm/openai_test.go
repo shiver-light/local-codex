@@ -3,9 +3,11 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestOpenAIClientChat(t *testing.T) {
@@ -78,13 +80,42 @@ func TestOpenAIClientChat(t *testing.T) {
 
 func TestOpenAIClientErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"error":"boom"}`))
 	}))
 	defer srv.Close()
-	c := NewOpenAIClient(srv.URL+"/v1", "k", "m")
-	if _, err := c.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "x"}}}); err == nil {
-		t.Error("expected error for 500 response")
+	c := NewOpenAIClient(srv.URL, "k", "m")
+	_, err := c.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "x"}}})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected *HTTPError, got %T: %v", err, err)
+	}
+	if httpErr.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want 429", httpErr.StatusCode)
+	}
+	if httpErr.RetryAfter != 3*time.Second {
+		t.Errorf("RetryAfter = %v, want 3s", httpErr.RetryAfter)
+	}
+}
+
+// TestBaseURLV1AutoAppend: a base URL without the API prefix must still hit
+// /v1/chat/completions.
+func TestBaseURLV1AutoAppend(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewEncoder(w).Encode(ChatResponse{
+			Choices: []Choice{{Message: Message{Role: "assistant", Content: "ok"}}},
+		})
+	}))
+	defer srv.Close()
+	c := NewOpenAIClient(srv.URL, "k", "m")
+	if _, err := c.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "x"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Errorf("path = %q, want /v1/chat/completions", gotPath)
 	}
 }
 
