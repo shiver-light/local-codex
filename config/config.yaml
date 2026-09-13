@@ -1,6 +1,9 @@
 server:
   port: 8080
   host: 127.0.0.1
+  # Bearer token required for all /api/* requests. Leave empty to generate a
+  # random token at each startup (printed to the console).
+  token: ""
 
 llm:
   base_url: http://127.0.0.1:11435/v1

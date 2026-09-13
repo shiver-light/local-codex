@@ -3,6 +3,8 @@ package permission
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -68,21 +70,30 @@ type Request struct {
 // and blocks until someone resolves them via Resolve.
 type BrokerApprover struct {
 	mu       sync.Mutex
-	seq      int
 	pending  map[string]chan bool
-	onNewReq func(Request) // called when a new approval is requested
+	requests map[string]Request // full requests, fetchable by id via Pending
+	onNewReq func(Request)      // called when a new approval is requested
 }
 
 func NewBrokerApprover(onNew func(Request)) *BrokerApprover {
-	return &BrokerApprover{pending: map[string]chan bool{}, onNewReq: onNew}
+	return &BrokerApprover{pending: map[string]chan bool{}, requests: map[string]Request{}, onNewReq: onNew}
+}
+
+// newApprovalID returns an unguessable random approval id.
+func newApprovalID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("crypto/rand: %v", err))
+	}
+	return "approval-" + hex.EncodeToString(b[:])
 }
 
 func (b *BrokerApprover) Approve(ctx context.Context, command string, reason string) (bool, error) {
-	b.mu.Lock()
-	b.seq++
-	id := fmt.Sprintf("approval-%d", b.seq)
+	id := newApprovalID()
 	ch := make(chan bool, 1)
+	b.mu.Lock()
 	b.pending[id] = ch
+	b.requests[id] = Request{ID: id, Command: command, Reason: reason}
 	onNew := b.onNewReq
 	b.mu.Unlock()
 
@@ -92,6 +103,7 @@ func (b *BrokerApprover) Approve(ctx context.Context, command string, reason str
 	defer func() {
 		b.mu.Lock()
 		delete(b.pending, id)
+		delete(b.requests, id)
 		b.mu.Unlock()
 	}()
 
@@ -101,6 +113,14 @@ func (b *BrokerApprover) Approve(ctx context.Context, command string, reason str
 	case ok := <-ch:
 		return ok, nil
 	}
+}
+
+// Pending returns the full pending request for an id, if it is still open.
+func (b *BrokerApprover) Pending(id string) (Request, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r, ok := b.requests[id]
+	return r, ok
 }
 
 // Resolve answers a pending approval. Returns false if the id is unknown.

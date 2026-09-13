@@ -59,7 +59,7 @@ The core loop (`internal/agent/loop.go`):
 | `internal/permission` | Shell command policy (`safe` / `ask` / `blocked`) and approval flow |
 | `internal/agent` | Agent loop, system prompt, repetition/loop guards |
 | `internal/session` | Session state (messages, tool history, modified files); in-memory store behind an interface |
-| `internal/api` | HTTP API + SSE streaming of agent events |
+| `internal/api` | HTTP API + SSE streaming of agent events; bearer-token auth (`server.token` / `LOCAL_CODEX_TOKEN`, random per startup if unset), loopback-only CORS, 1 MiB request bodies, max 4 concurrent tasks |
 | `internal/config` | YAML + env configuration (env wins) |
 | `internal/logging` | Structured JSON event log (never logs API keys) |
 | `cmd/local-codex` | CLI entrypoint (`local-codex <workspace>`) |

@@ -90,6 +90,10 @@ func main() {
 	if *serve {
 		srv := api.NewServer(cfg, ws, ag, store)
 		fmt.Printf("local-codex server on http://%s:%d (workspace: %s)\n", cfg.Server.Host, cfg.Server.Port, ws.Root())
+		if cfg.Server.Token == "" {
+			fmt.Printf("generated API token (set LOCAL_CODEX_TOKEN to pin it): %s\n", srv.Token())
+		}
+		fmt.Printf("web UI: http://%s:%d/?token=%s\n", cfg.Server.Host, cfg.Server.Port, srv.Token())
 		if err := srv.ListenAndServe(ctx); err != nil {
 			fatal("server: %v", err)
 		}

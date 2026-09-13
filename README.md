@@ -93,6 +93,7 @@ YAML (`config/config.yaml`) plus environment variables; **env wins**.
 | `LLM_MODEL` | `llm.model` | `qwen3-coder` |
 | `MAX_AGENT_ITERATIONS` | `agent.max_iterations` | `30` |
 | `PORT` | `server.port` | `8080` |
+| `LOCAL_CODEX_TOKEN` | `server.token` | *(random per startup)* |
 | `SHELL_DEFAULT_TIMEOUT` | `shell.default_timeout` | `120` |
 
 ## Adding a tool
@@ -123,6 +124,20 @@ your own wiring code. The agent loop picks it up automatically.
 
 ## Security model
 
+- All `/api/*` endpoints require a bearer token (`Authorization: Bearer
+  <token>`; the SSE stream accepts `?token=` because `EventSource` cannot set
+  headers). Set it via `server.token` / `LOCAL_CODEX_TOKEN`, otherwise a
+  random token is generated at startup and printed to the console — the web
+  UI URL printed at startup already carries it.
+- CORS is same-origin by default; only loopback origins
+  (`http://127.0.0.1:*`, `http://localhost:*`) are echoed, so arbitrary web
+  pages cannot drive the local API from a browser.
+- `POST /api/tasks` bodies are capped at 1 MiB and at most 4 tasks run
+  concurrently (excess submissions get `429`); the HTTP server enforces a
+  10 s `ReadHeaderTimeout`.
+- Approval requests get unguessable random IDs, and SSE approval events
+  carry only the ID — the command text is fetched from
+  `GET /api/approvals/{id}`.
 - All file paths are resolved against the workspace root; `..`, absolute paths
   outside the root, and symlink escapes are rejected.
 - Shell commands are parsed into a syntax tree (`mvdan.cc/sh`) and every

@@ -29,6 +29,12 @@ body {
 .logo { font-weight: 700; letter-spacing: 0.5px; }
 .status { color: var(--dim); font-size: 12px; }
 .status.running { color: var(--accent); }
+.token-btn {
+  margin-left: auto; background: none; border: 1px solid var(--border);
+  color: var(--dim); font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  cursor: pointer;
+}
+.token-btn:hover { color: var(--text); }
 
 .main { display: flex; flex: 1; min-height: 0; }
 

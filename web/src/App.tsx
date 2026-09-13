@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AgentEvent, api } from "./api";
+import { AgentEvent, api, eventsURL, getToken, setToken } from "./api";
 import { EventView } from "./components/EventView";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { SidePanel } from "./components/SidePanel";
@@ -17,7 +17,7 @@ export default function App() {
 
   // Global SSE stream: append events, track approvals and completion.
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    const es = new EventSource(eventsURL());
     const types = [
       "user_message",
       "agent_message",
@@ -32,14 +32,24 @@ export default function App() {
         const e = JSON.parse((ev as MessageEvent).data) as AgentEvent;
         if (sessionId && e.session_id && e.session_id !== sessionId) return;
         if (e.type === "approval") {
-          setPendingApprovals((prev) => [
-            ...prev,
-            {
-              id: String(e.data?.id),
-              command: String(e.data?.command),
-              reason: String(e.data?.reason),
-            },
-          ]);
+          // The broadcast carries only the approval id; fetch the full
+          // request (command, reason) from the API.
+          const id = String(e.data?.id);
+          api
+            .getApproval(id)
+            .then((req) =>
+              setPendingApprovals((prev) =>
+                prev.some((a) => a.id === req.id)
+                  ? prev
+                  : [
+                      ...prev,
+                      { id: req.id, command: req.command, reason: req.reason },
+                    ]
+              )
+            )
+            .catch(() => {
+              // approval may already be resolved; harmless
+            });
         }
         if (e.type === "agent_finished") {
           setRunning(false);
@@ -86,6 +96,14 @@ export default function App() {
     }
   };
 
+  const editToken = () => {
+    const t = window.prompt("API token (from server startup output)", getToken());
+    if (t !== null) {
+      setToken(t.trim());
+      window.location.reload();
+    }
+  };
+
   return (
     <div className="layout">
       <header className="topbar">
@@ -93,6 +111,9 @@ export default function App() {
         <span className={running ? "status running" : "status"}>
           {running ? "● agent running" : "○ idle"}
         </span>
+        <button className="token-btn" onClick={editToken} title="Set API token">
+          token
+        </button>
       </header>
       <div className="main">
         <aside className="sidebar">

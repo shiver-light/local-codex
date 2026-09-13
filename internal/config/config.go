@@ -20,6 +20,9 @@ type Config struct {
 type ServerConfig struct {
 	Port int    `yaml:"port"`
 	Host string `yaml:"host"`
+	// Token authenticates /api/* requests (Bearer header). Empty means the
+	// server generates a random token at startup and prints it.
+	Token string `yaml:"token"`
 }
 
 type LLMConfig struct {
@@ -110,6 +113,7 @@ func applyEnv(cfg *Config) {
 	setInt("MAX_AGENT_ITERATIONS", &cfg.Agent.MaxIterations)
 	setInt("PORT", &cfg.Server.Port)
 	setStr("HOST", &cfg.Server.Host)
+	setStr("LOCAL_CODEX_TOKEN", &cfg.Server.Token)
 	setInt("SHELL_DEFAULT_TIMEOUT", &cfg.Shell.DefaultTimeout)
 	setStr("LOG_LEVEL", &cfg.Logging.Level)
 	setStr("LOG_FILE", &cfg.Logging.File)
