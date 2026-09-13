@@ -58,6 +58,17 @@ func (e *Executor) Run(ctx context.Context, command, cwd string, timeout time.Du
 
 	cmd := exec.CommandContext(tctx, "bash", "-c", command)
 	cmd.Dir = dir
+	setProcGroup(cmd)
+	// The default Cancel kills only the direct child (bash), leaving
+	// backgrounded grandchildren alive — and their inherited pipes would
+	// block Wait forever. Kill the whole process group instead.
+	cmd.Cancel = func() error {
+		killProcessGroup(cmd)
+		return nil
+	}
+	// Bound Wait so output-copy goroutines cannot hang on pipes inherited
+	// by a process that survived the kill.
+	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

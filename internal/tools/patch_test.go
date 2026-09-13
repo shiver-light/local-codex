@@ -138,6 +138,33 @@ func TestApplyPatchMultipleHunks(t *testing.T) {
 	}
 }
 
+func TestApplyPatchPreservesFileMode(t *testing.T) {
+	ws := testWorkspace(t)
+	abs := filepath.Join(ws.Root(), "run.sh")
+	if err := os.WriteFile(abs, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool := &ApplyPatchTool{WS: ws}
+
+	patch := `*** Begin Patch
+*** Update File: run.sh
+@@
+-echo old
++echo new
+*** End Patch`
+	res, _ := tool.Execute(context.Background(), json.RawMessage(mustJSON(t, map[string]string{"patch": patch})))
+	if res.IsError {
+		t.Fatalf("patch failed: %s", res.Content)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode changed to %o; executable bit must survive an update", info.Mode().Perm())
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

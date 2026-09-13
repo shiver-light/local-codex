@@ -115,8 +115,44 @@ func TestReadFileRange(t *testing.T) {
 	}
 }
 
-// --- list_files ---
+func TestReadFileRejectsDirectoryAndBinary(t *testing.T) {
+	ws := testWorkspace(t)
+	tool := &ReadFileTool{WS: ws}
 
+	res, _ := tool.Execute(context.Background(), json.RawMessage(`{"path":"."}`))
+	if !res.IsError || !strings.Contains(res.Content, "directory") {
+		t.Errorf("directory should be rejected:\n%s", res.Content)
+	}
+
+	write(t, ws, "bin.dat", string([]byte{0x7f, 'E', 'L', 'F', 0, 1, 2, 3}))
+	res, _ = tool.Execute(context.Background(), json.RawMessage(`{"path":"bin.dat"}`))
+	if !res.IsError || !strings.Contains(res.Content, "binary") {
+		t.Errorf("binary file should be rejected:\n%s", res.Content)
+	}
+}
+
+func TestReadFileRejectsOversized(t *testing.T) {
+	ws := testWorkspace(t)
+	abs := filepath.Join(ws.Root(), "huge.bin")
+	f, err := os.Create(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 5MB sparse file: must be rejected from the stat, not after a full read.
+	if err := f.Truncate(5 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tool := &ReadFileTool{WS: ws}
+	res, _ := tool.Execute(context.Background(), json.RawMessage(`{"path":"huge.bin"}`))
+	if !res.IsError || !strings.Contains(res.Content, "too large") {
+		t.Errorf("oversized file should be rejected:\n%s", res.Content)
+	}
+}
+
+// --- list_files ---
 func TestListFiles(t *testing.T) {
 	ws := testWorkspace(t)
 	write(t, ws, "go.mod", "module x")

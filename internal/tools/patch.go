@@ -211,6 +211,10 @@ func applyAdd(abs string, lines []string) error {
 }
 
 func applyUpdate(abs string, hunks []hunk) error {
+	info, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return err
@@ -247,7 +251,9 @@ func applyUpdate(abs string, hunks []hunk) error {
 	if hadTrailingNewline {
 		out += "\n"
 	}
-	return os.WriteFile(abs, []byte(out), 0o644)
+	// Write back with the file's original mode so updating an executable
+	// script does not strip its permission bits.
+	return os.WriteFile(abs, []byte(out), info.Mode().Perm())
 }
 
 // findSubslice returns the index of the first occurrence of sub in lines at

@@ -54,14 +54,32 @@ func (t *ReadFileTool) Execute(ctx context.Context, args json.RawMessage) (Resul
 	if err != nil {
 		return Error("%v", err), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return Error("read cancelled: %v", err), nil
+	}
+
+	// Stat before reading: Resolve already evaluates symlinks for existing
+	// paths, so Stat observes the final target. This rejects non-regular
+	// files (a FIFO or device would block ReadFile forever) and oversized
+	// files before they are loaded into memory.
+	info, err := os.Stat(abs)
+	if err != nil {
+		return Error("read %s: %v", a.Path, err), nil
+	}
+	if !info.Mode().IsRegular() {
+		return Error("%s is not a regular file (%s); only regular files can be read", a.Path, fileKind(info.Mode())), nil
+	}
+	const maxFileBytes = 4 << 20
+	if info.Size() > maxFileBytes {
+		return Error("file %s is too large (%d bytes); read it with start_line/end_line via search_code instead", a.Path, info.Size()), nil
+	}
+
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return Error("read %s: %v", a.Path, err), nil
 	}
-
-	const maxFileBytes = 4 << 20
-	if len(data) > maxFileBytes {
-		return Error("file %s is too large (%d bytes); read it with start_line/end_line via search_code instead", a.Path, len(data)), nil
+	if looksBinary(data) {
+		return Error("file %s looks like a binary file; refusing to load it into context", a.Path), nil
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -94,4 +112,44 @@ func (t *ReadFileTool) Execute(ctx context.Context, args json.RawMessage) (Resul
 		fmt.Fprintf(&b, "...(%d more lines; use start_line=%d to continue)\n", total-end, end+1)
 	}
 	return Text("%s", b.String()), nil
+}
+
+// fileKind describes a non-regular file type for error messages.
+func fileKind(m os.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m&os.ModeNamedPipe != 0:
+		return "FIFO/named pipe"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeDevice != 0:
+		return "device file"
+	case m&os.ModeSymlink != 0:
+		return "symlink"
+	default:
+		return m.Type().String()
+	}
+}
+
+// looksBinary reports whether data appears to be binary: a NUL byte in the
+// first 8KB, or a high proportion of non-printable control bytes.
+func looksBinary(data []byte) bool {
+	const sniff = 8192
+	if len(data) > sniff {
+		data = data[:sniff]
+	}
+	if len(data) == 0 {
+		return false
+	}
+	bad := 0
+	for _, b := range data {
+		if b == 0 {
+			return true
+		}
+		if (b < 0x20 && b != '\t' && b != '\n' && b != '\r') || b == 0x7f {
+			bad++
+		}
+	}
+	return float64(bad)/float64(len(data)) > 0.3
 }
