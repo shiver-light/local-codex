@@ -49,6 +49,13 @@ export function EventView({ event: e }: { event: AgentEvent }) {
       );
     case "error":
       return <div className="error">Error: {String(e.data?.error ?? "")}</div>;
+    case "context_compacted":
+      return (
+        <div className="compacted">
+          Context compacted: {formatBytes(e.data?.bytes_before)} →{" "}
+          {formatBytes(e.data?.bytes_after)} (earlier messages summarized)
+        </div>
+      );
     case "agent_finished":
       return (
         <div className={"finished" + (e.success === false ? " failed" : "")}>
@@ -60,6 +67,12 @@ export function EventView({ event: e }: { event: AgentEvent }) {
     default:
       return null;
   }
+}
+
+function formatBytes(v: unknown): string {
+  const n = Number(v ?? 0);
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
 }
 
 function summarizeArgs(e: AgentEvent): string {

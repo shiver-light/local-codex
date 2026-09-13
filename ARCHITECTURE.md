@@ -121,7 +121,22 @@ Built-in tools: `list_files`, `read_file`, `search_code`, `apply_patch`,
 Tool-driven context: the model discovers the repo incrementally via
 `list_files` / `search_code` / `read_file` (capped at 300 lines per read by
 default). No whole-repo embedding, no vector DB. The agent loop guards against
-unbounded history growth with a message/byte budget and truncation notices.
+unbounded history growth with a byte budget (`agent.max_context_bytes`). When
+the budget is exceeded and `agent.compact` is on (default), the oldest
+messages are summarized by the LLM (one extra tool-less chat call capped at
+1024 completion tokens) and replaced by a synthetic `[Earlier work summary]`
+user message; the original task message and the `compact_keep_recent` most
+recent messages are always kept verbatim. Compaction never splits a
+tool_call/tool_result pair: the history is grouped into atomic units
+(assistant message with tool_calls plus all its tool results) and batch
+boundaries fall between units. The summary call is counted in the session
+usage stats but streams no `llm_delta` events; a `context_compacted` event
+(with before/after byte counts) is broadcast instead. If the summary call
+fails, comes back empty, or saves too little (< 512 bytes or < 2x reduction),
+the agent falls back to the original hard truncation of old tool results —
+compaction can never abort a task. If the compacted history still exceeds the
+budget, hard truncation covers the remainder (no second summary in the same
+round).
 
 ## Data Flow (one task)
 

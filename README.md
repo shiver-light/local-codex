@@ -93,6 +93,8 @@ YAML (`config/config.yaml`) plus environment variables; **env wins**.
 | `LLM_MODEL` | `llm.model` | `qwen3-coder` |
 | `LLM_STREAM` | `llm.stream` | `true` |
 | `MAX_AGENT_ITERATIONS` | `agent.max_iterations` | `30` |
+| `AGENT_COMPACT` | `agent.compact` | `true` |
+| `AGENT_COMPACT_KEEP_RECENT` | `agent.compact_keep_recent` | `6` |
 | `PORT` | `server.port` | `8080` |
 | `LOCAL_CODEX_TOKEN` | `server.token` | *(random per startup)* |
 | `SHELL_DEFAULT_TIMEOUT` | `shell.default_timeout` | `120` |

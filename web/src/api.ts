@@ -14,6 +14,7 @@ export interface AgentEvent {
     | "agent_message"
     | "approval"
     | "agent_finished"
+    | "context_compacted"
     | "error";
   tool?: string;
   success?: boolean;

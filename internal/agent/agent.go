@@ -31,6 +31,14 @@ type Agent struct {
 	MaxRepeatToolCalls int
 	MaxContextBytes    int
 
+	// Compact enables LLM-based context compaction: when the history exceeds
+	// MaxContextBytes, the oldest messages are summarized by the model and
+	// replaced instead of only being hard-truncated. Failures fall back to
+	// truncation. CompactKeepRecent trailing messages are never compacted
+	// (zero uses a default of 6).
+	Compact           bool
+	CompactKeepRecent int
+
 	// Temperature and MaxTokens are forwarded to every chat request when
 	// set (zero values are omitted, leaving the server defaults).
 	Temperature *float64
@@ -81,7 +89,7 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, task string) (st
 		if err := ctx.Err(); err != nil {
 			return "", fmt.Errorf("agent cancelled: %w", err)
 		}
-		messages := a.buildMessages(sess)
+		messages := a.buildMessages(ctx, sess, iter)
 
 		a.emit(logging.Event{Type: "llm_request", SessionID: sess.ID, Iteration: iter,
 			Data: map[string]any{"messages": len(messages), "model": a.LLM.Model()}})
@@ -358,8 +366,10 @@ func (a *Agent) executeToolCall(ctx context.Context, sess *session.Session, iter
 }
 
 // buildMessages assembles the message list sent to the LLM and enforces the
-// context byte budget by truncating old tool results.
-func (a *Agent) buildMessages(sess *session.Session) []llm.Message {
+// context byte budget: with Compact enabled it summarizes the oldest history
+// via the LLM, otherwise (or on any compaction failure) it hard-truncates
+// old tool results.
+func (a *Agent) buildMessages(ctx context.Context, sess *session.Session, iter int) []llm.Message {
 	history := sess.SnapshotMessages()
 	messages := make([]llm.Message, 0, len(history)+1)
 	messages = append(messages, llm.Message{Role: "system", Content: SystemPrompt})
@@ -373,7 +383,12 @@ func (a *Agent) buildMessages(sess *session.Session) []llm.Message {
 		budget = 200_000
 	}
 	if contextBytes(messages) > budget {
-		sess.ReplaceMessages(shrinkHistory(history, budget-len(SystemPrompt)))
+		historyBudget := budget - len(SystemPrompt)
+		if a.Compact {
+			sess.ReplaceMessages(a.compactHistory(ctx, sess, history, historyBudget, iter))
+		} else {
+			sess.ReplaceMessages(shrinkHistory(history, historyBudget))
+		}
 		history = sess.SnapshotMessages()
 		messages = append([]llm.Message{{Role: "system", Content: SystemPrompt}}, history...)
 	}
@@ -398,12 +413,14 @@ func shrinkHistory(history []llm.Message, budget int) []llm.Message {
 	for contextBytes(history) > budget {
 		shrank := false
 		for i := range history {
-			// keep the first two messages (task + first reply) intact
-			if i < 2 || history[i].Role != "tool" || len(history[i].Content) <= keepTail {
+			// keep the first two messages (task + first reply) intact; an
+			// already-truncated message (keepTail + notice) is skipped so a
+			// second pass can never re-truncate it forever.
+			if i < 2 || history[i].Role != "tool" ||
+				len(history[i].Content) <= keepTail+len(truncNotice) {
 				continue
 			}
-			history[i].Content = truncateUTF8(history[i].Content, keepTail) +
-				"\n...(older tool output truncated to bound context size)"
+			history[i].Content = truncateUTF8(history[i].Content, keepTail) + truncNotice
 			shrank = true
 			if contextBytes(history) <= budget {
 				break
@@ -415,6 +432,8 @@ func shrinkHistory(history []llm.Message, budget int) []llm.Message {
 	}
 	return history
 }
+
+const truncNotice = "\n...(older tool output truncated to bound context size)"
 
 var patchFileRe = regexp.MustCompile(`\*\*\* (?:Update File|Add File|Delete File):\s*([^\n\\"]+)`)
 

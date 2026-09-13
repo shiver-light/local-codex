@@ -26,3 +26,17 @@ When the task is complete, reply with a summary containing:
 - What you implemented
 - Tests/builds executed and their results
 - Remaining risks or notes`
+
+// CompactSummaryPrompt drives the context-compaction summary call: the model
+// condenses a batch of old conversation messages into a working summary that
+// replaces them in the history.
+const CompactSummaryPrompt = `You compact the earlier conversation of an autonomous coding agent into a concise working summary. Your summary replaces the original messages in the agent's context, so it must preserve everything needed to continue the task without them.
+
+Write under 400 words, covering exactly these sections:
+- Goal: the user's original task and any stated constraints.
+- Files: every file created or modified so far, with a one-line note per change.
+- Decisions: key design/implementation decisions and their rationale.
+- Pitfalls: approaches that failed, errors encountered, and lessons learned.
+- State: current progress, what has been verified (builds/tests), and the immediate next step.
+
+Be terse and factual. Do not invent anything; drop chit-chat, redundant tool output and reasoning.`

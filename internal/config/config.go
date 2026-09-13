@@ -41,6 +41,13 @@ type AgentConfig struct {
 	MaxIterations      int `yaml:"max_iterations"`
 	MaxRepeatToolCalls int `yaml:"max_consecutive_repeat_tool_calls"`
 	MaxContextBytes    int `yaml:"max_context_bytes"`
+	// Compact replaces hard truncation with LLM-based context compaction:
+	// when the history exceeds max_context_bytes, the oldest messages are
+	// summarized by the model (one extra chat call) and swapped for the
+	// summary. Failures fall back to truncation.
+	Compact bool `yaml:"compact"`
+	// CompactKeepRecent is how many trailing messages are never compacted.
+	CompactKeepRecent int `yaml:"compact_keep_recent"`
 }
 
 type WorkspaceConfig struct {
@@ -73,6 +80,8 @@ func Default() *Config {
 			MaxIterations:      30,
 			MaxRepeatToolCalls: 3,
 			MaxContextBytes:    200_000,
+			Compact:            true,
+			CompactKeepRecent:  6,
 		},
 		Workspace: WorkspaceConfig{Root: "."},
 		Shell:     ShellConfig{DefaultTimeout: 120, MaxTimeout: 600},
@@ -127,6 +136,8 @@ func applyEnv(cfg *Config) {
 	setStr("LLM_MODEL", &cfg.LLM.Model)
 	setBool("LLM_STREAM", &cfg.LLM.Stream)
 	setInt("MAX_AGENT_ITERATIONS", &cfg.Agent.MaxIterations)
+	setBool("AGENT_COMPACT", &cfg.Agent.Compact)
+	setInt("AGENT_COMPACT_KEEP_RECENT", &cfg.Agent.CompactKeepRecent)
 	setInt("PORT", &cfg.Server.Port)
 	setStr("HOST", &cfg.Server.Host)
 	setStr("LOCAL_CODEX_TOKEN", &cfg.Server.Token)

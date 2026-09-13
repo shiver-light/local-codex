@@ -82,6 +82,8 @@ func main() {
 		MaxIterations:      cfg.Agent.MaxIterations,
 		MaxRepeatToolCalls: cfg.Agent.MaxRepeatToolCalls,
 		MaxContextBytes:    cfg.Agent.MaxContextBytes,
+		Compact:            cfg.Agent.Compact,
+		CompactKeepRecent:  cfg.Agent.CompactKeepRecent,
 		Temperature:        cfg.LLM.Temperature,
 		MaxTokens:          cfg.LLM.MaxTokens,
 		Stream:             cfg.LLM.Stream,
@@ -187,6 +189,8 @@ func printEvents(events <-chan logging.Event, out io.Writer) {
 				status = "FAILED"
 			}
 			fmt.Fprintf(out, "[Tool Result] %s (%s, %s)\n%s\n", e.Tool, status, e.Duration, e.Data["content"])
+		case "context_compacted":
+			fmt.Fprintf(out, "\n[Context compacted] %v -> %v bytes\n", e.Data["bytes_before"], e.Data["bytes_after"])
 		case "error":
 			if streaming {
 				fmt.Fprint(out, "\n")

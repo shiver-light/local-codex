@@ -95,6 +95,7 @@ body {
 .error { color: var(--fail); margin: 8px 0; }
 .finished { color: var(--ok); margin: 12px 0; font-weight: 600; }
 .finished.failed { color: var(--fail); }
+.compacted { color: var(--muted, #888); margin: 8px 0; font-size: 0.85em; }
 
 .approval {
   border: 1px solid #b98900; background: #241d07; border-radius: 8px;

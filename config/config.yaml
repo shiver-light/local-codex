@@ -19,6 +19,12 @@ llm:
 agent:
   max_iterations: 30
   max_consecutive_repeat_tool_calls: 3
+  # LLM-based context compaction: when the history exceeds the byte budget,
+  # summarize the oldest messages with the model instead of only truncating
+  # them. Falls back to truncation if the summary call fails.
+  compact: true
+  # How many trailing messages are never compacted.
+  compact_keep_recent: 6
 
 workspace:
   root: .

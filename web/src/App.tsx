@@ -53,6 +53,7 @@ export default function App() {
       "tool_result",
       "approval",
       "agent_finished",
+      "context_compacted",
       "error",
     ];
     for (const t of types) {

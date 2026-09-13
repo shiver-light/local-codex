@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"local-codex/internal/llm"
+	"local-codex/internal/logging"
 	"local-codex/internal/permission"
 	"local-codex/internal/session"
 	"local-codex/internal/tools"
@@ -512,5 +513,289 @@ func TestTruncateUTF8(t *testing.T) {
 	}
 	if got := truncateUTF8(s, len(s)+10); got != s {
 		t.Errorf("truncateUTF8 overlong = %q, want %q", got, s)
+	}
+}
+
+// countToolMessages returns how many tool results the request history holds.
+func countToolMessages(req llm.ChatRequest) int {
+	n := 0
+	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestContextCompaction: when the history exceeds the byte budget, the
+// oldest messages must be replaced by an LLM-generated summary (one extra
+// tool-less chat call), tool_call/tool_result pairing must stay intact, and
+// the task message plus the most recent exchanges must survive verbatim.
+func TestContextCompaction(t *testing.T) {
+	ws, err := workspace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Root(), "big.txt"),
+		[]byte(strings.Repeat("x", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	summaryCalls := 0
+	sawSummaryInHistory := false
+	mock := &chatFuncLLM{model: "mock"}
+	mock.fn = func(req llm.ChatRequest) (*llm.ChatResponse, error) {
+		assertToolCallPairing(t, req.Messages)
+		if len(req.Tools) == 0 {
+			// The compaction summary call: tool-less and max_tokens capped.
+			summaryCalls++
+			if req.MaxTokens != compactSummaryMaxTokens {
+				t.Errorf("summary max_tokens = %d, want %d", req.MaxTokens, compactSummaryMaxTokens)
+			}
+			return &llm.ChatResponse{
+				Choices: []llm.Choice{{Message: llm.Message{Role: "assistant",
+					Content: "- Goal: compaction demo\n- Files: none changed\n- State: read big.txt twice"}}},
+				Usage: llm.Usage{PromptTokens: 500, CompletionTokens: 50, TotalTokens: 550},
+			}, nil
+		}
+		for _, m := range req.Messages {
+			if m.Role == "user" && strings.HasPrefix(m.Content, "[Earlier work summary]") {
+				sawSummaryInHistory = true
+			}
+		}
+		if sawSummaryInHistory {
+			return &llm.ChatResponse{
+				Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "all done"}}},
+				Usage:   llm.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+			}, nil
+		}
+		n := countToolMessages(req)
+		return &llm.ChatResponse{
+			Choices: []llm.Choice{{Message: toolCall(fmt.Sprintf("c%d", n+1), "read_file", `{"path":"big.txt"}`)}},
+			Usage:   llm.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+		}, nil
+	}
+
+	a, sess := newTestAgent(t, ws, mock, 10)
+	a.MaxContextBytes = len(SystemPrompt) + 2500
+	a.Compact = true
+	a.CompactKeepRecent = 2
+	a.Broker = NewEventBroker()
+	events, unsubscribe := a.Broker.Subscribe()
+	defer unsubscribe()
+
+	answer, err := a.Run(context.Background(), sess, "the original compaction task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "all done" {
+		t.Errorf("unexpected answer %q", answer)
+	}
+	if summaryCalls != 1 {
+		t.Errorf("expected exactly 1 summary call, got %d", summaryCalls)
+	}
+	if !sawSummaryInHistory {
+		t.Error("compacted summary message never appeared in the request history")
+	}
+
+	history := sess.SnapshotMessages()
+	assertToolCallPairing(t, history)
+	if history[0].Role != "user" || history[0].Content != "the original compaction task" {
+		t.Errorf("original task message was not preserved: %+v", history[0])
+	}
+	// The most recent tool exchange (c2) must survive verbatim-ish (only the
+	// post-compaction hard truncation may trim its content).
+	foundC2 := false
+	for _, m := range history {
+		if m.Role == "tool" && m.ToolCallID == "c2" {
+			foundC2 = true
+		}
+	}
+	if !foundC2 {
+		t.Error("the most recent tool result (c2) was compacted away")
+	}
+
+	// The summary call is counted in the session usage: 3 main calls at 110
+	// tokens plus 550 for the summary.
+	if sess.Usage.LLMCalls != 4 {
+		t.Errorf("LLMCalls = %d, want 4 (3 main + 1 summary)", sess.Usage.LLMCalls)
+	}
+	if sess.Usage.TotalTokens != 3*110+550 {
+		t.Errorf("TotalTokens = %d, want %d", sess.Usage.TotalTokens, 3*110+550)
+	}
+
+	// A context_compacted event with before/after byte counts must have been
+	// broadcast.
+	var compactedEv *logging.Event
+	drain := true
+	for drain {
+		select {
+		case e := <-events:
+			if e.Type == "context_compacted" {
+				ev := e
+				compactedEv = &ev
+			}
+		default:
+			drain = false
+		}
+	}
+	if compactedEv == nil {
+		t.Fatal("no context_compacted event broadcast")
+	}
+	before, _ := compactedEv.Data["bytes_before"].(int)
+	after, _ := compactedEv.Data["bytes_after"].(int)
+	if before <= 0 || after <= 0 || after >= before {
+		t.Errorf("bad compaction byte counts: before=%d after=%d", before, after)
+	}
+}
+
+// TestContextCompactionFallback: when the summary call fails, the agent must
+// fall back to hard truncation and keep going — never abort the task.
+func TestContextCompactionFallback(t *testing.T) {
+	ws, err := workspace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Root(), "big.txt"),
+		[]byte(strings.Repeat("y", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	summaryCalls := 0
+	mock := &chatFuncLLM{model: "mock"}
+	mock.fn = func(req llm.ChatRequest) (*llm.ChatResponse, error) {
+		assertToolCallPairing(t, req.Messages)
+		if len(req.Tools) == 0 {
+			summaryCalls++
+			return nil, fmt.Errorf("summary model unavailable")
+		}
+		// Two tool rounds are enough to make the history exceed the budget
+		// with a compaction-safe batch; finish on the next iteration.
+		if countToolMessages(req) >= 2 {
+			return &llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{
+				Role: "assistant", Content: "finished despite failed compaction"}}}}, nil
+		}
+		n := countToolMessages(req)
+		return &llm.ChatResponse{Choices: []llm.Choice{{Message: toolCall(
+			fmt.Sprintf("c%d", n+1), "read_file", `{"path":"big.txt"}`)}}}, nil
+	}
+
+	a, sess := newTestAgent(t, ws, mock, 10)
+	a.MaxContextBytes = len(SystemPrompt) + 2500
+	a.Compact = true
+	a.CompactKeepRecent = 2
+
+	answer, err := a.Run(context.Background(), sess, "task with failing compaction")
+	if err != nil {
+		t.Fatalf("compaction failure must not abort the task: %v", err)
+	}
+	if answer != "finished despite failed compaction" {
+		t.Errorf("unexpected answer %q", answer)
+	}
+	if summaryCalls == 0 {
+		t.Error("summary call was never attempted")
+	}
+	history := sess.SnapshotMessages()
+	assertToolCallPairing(t, history)
+	truncated := false
+	for _, m := range history {
+		if strings.HasPrefix(m.Content, "[Earlier work summary]") {
+			t.Error("a summary message appeared even though compaction failed")
+		}
+		if strings.Contains(m.Content, "truncated to bound context size") {
+			truncated = true
+		}
+	}
+	if !truncated {
+		t.Error("hard-truncation fallback never engaged")
+	}
+	if history[0].Content != "task with failing compaction" {
+		t.Errorf("task message not preserved: %+v", history[0])
+	}
+}
+
+// TestContextCompactionLowSavingsFallback: a summary that barely shrinks the
+// batch is rejected and hard truncation takes over.
+func TestContextCompactionLowSavingsFallback(t *testing.T) {
+	ws, err := workspace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Root(), "big.txt"),
+		[]byte(strings.Repeat("z", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &chatFuncLLM{model: "mock"}
+	mock.fn = func(req llm.ChatRequest) (*llm.ChatResponse, error) {
+		if len(req.Tools) == 0 {
+			// A bloated "summary" nearly as large as the batch it replaces.
+			return &llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{
+				Role: "assistant", Content: strings.Repeat("s", 1800)}}}}, nil
+		}
+		if countToolMessages(req) >= 2 {
+			return &llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{
+				Role: "assistant", Content: "done via truncation"}}}}, nil
+		}
+		n := countToolMessages(req)
+		return &llm.ChatResponse{Choices: []llm.Choice{{Message: toolCall(
+			fmt.Sprintf("c%d", n+1), "read_file", `{"path":"big.txt"}`)}}}, nil
+	}
+
+	a, sess := newTestAgent(t, ws, mock, 10)
+	a.MaxContextBytes = len(SystemPrompt) + 2500
+	a.Compact = true
+	a.CompactKeepRecent = 2
+
+	answer, err := a.Run(context.Background(), sess, "low savings task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done via truncation" {
+		t.Errorf("unexpected answer %q", answer)
+	}
+	for _, m := range sess.SnapshotMessages() {
+		if strings.HasPrefix(m.Content, "[Earlier work summary]") {
+			t.Error("low-savings summary must not be installed into history")
+		}
+	}
+}
+
+// TestSplitUnitsPairing: splitUnits must treat an assistant message with
+// tool_calls plus its tool results as one atomic unit, so compaction batch
+// boundaries can never separate a call from its result.
+func TestSplitUnitsPairing(t *testing.T) {
+	history := []llm.Message{
+		{Role: "user", Content: "task"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{
+			{ID: "c1", Function: llm.FunctionCall{Name: "read_file"}},
+			{ID: "c2", Function: llm.FunctionCall{Name: "search_code"}},
+		}},
+		{Role: "tool", ToolCallID: "c1", Content: "..."},
+		{Role: "tool", ToolCallID: "c2", Content: "..."},
+		{Role: "assistant", Content: "note"},
+		{Role: "user", Content: "nudge"},
+	}
+	units := splitUnits(history)
+	if len(units) != 4 {
+		t.Fatalf("expected 4 units, got %d", len(units))
+	}
+	if len(units[1]) != 3 {
+		t.Errorf("assistant+tool-results group must be one unit of 3 messages, got %d", len(units[1]))
+	}
+
+	// The cut must leave at least keepRecent trailing messages untouched.
+	if cut := findCompactCut(units, 1); cut != 3 {
+		t.Errorf("findCompactCut(keepRecent=1) = %d, want 3", cut)
+	}
+	if cut := findCompactCut(units, 2); cut != 2 {
+		t.Errorf("findCompactCut(keepRecent=2) = %d, want 2", cut)
+	}
+	// keepRecent=3 leaves an empty batch (cut 1), and keeping everything
+	// leaves nothing at all: both signal "nothing safe to summarize".
+	for _, kr := range []int{3, 6} {
+		if cut := findCompactCut(units, kr); cut >= 2 {
+			t.Errorf("findCompactCut(keepRecent=%d) = %d, want < 2", kr, cut)
+		}
 	}
 }
