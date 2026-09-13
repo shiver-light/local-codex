@@ -49,6 +49,11 @@ type Agent struct {
 	// streaming failure the agent falls back to a plain request.
 	Stream bool
 
+	// WorkspaceRoot, when set, is injected into the system prompt together
+	// with OS/arch info (see BuildSystemPrompt). Empty keeps the bare
+	// SystemPrompt.
+	WorkspaceRoot string
+
 	// retryBackoff is the initial retry delay; tests shrink it.
 	retryBackoff time.Duration
 }
@@ -370,9 +375,10 @@ func (a *Agent) executeToolCall(ctx context.Context, sess *session.Session, iter
 // via the LLM, otherwise (or on any compaction failure) it hard-truncates
 // old tool results.
 func (a *Agent) buildMessages(ctx context.Context, sess *session.Session, iter int) []llm.Message {
+	sysPrompt := a.systemPrompt()
 	history := sess.SnapshotMessages()
 	messages := make([]llm.Message, 0, len(history)+1)
-	messages = append(messages, llm.Message{Role: "system", Content: SystemPrompt})
+	messages = append(messages, llm.Message{Role: "system", Content: sysPrompt})
 	for _, m := range history {
 		m.ReasoningContent = "" // never send reasoning back to the server
 		messages = append(messages, m)
@@ -383,16 +389,25 @@ func (a *Agent) buildMessages(ctx context.Context, sess *session.Session, iter i
 		budget = 200_000
 	}
 	if contextBytes(messages) > budget {
-		historyBudget := budget - len(SystemPrompt)
+		historyBudget := budget - len(sysPrompt)
 		if a.Compact {
 			sess.ReplaceMessages(a.compactHistory(ctx, sess, history, historyBudget, iter))
 		} else {
 			sess.ReplaceMessages(shrinkHistory(history, historyBudget))
 		}
 		history = sess.SnapshotMessages()
-		messages = append([]llm.Message{{Role: "system", Content: SystemPrompt}}, history...)
+		messages = append([]llm.Message{{Role: "system", Content: sysPrompt}}, history...)
 	}
 	return messages
+}
+
+// systemPrompt returns the system prompt for this run: the bare SystemPrompt,
+// or BuildSystemPrompt with environment info when the workspace root is known.
+func (a *Agent) systemPrompt() string {
+	if a.WorkspaceRoot == "" {
+		return SystemPrompt
+	}
+	return BuildSystemPrompt(a.WorkspaceRoot)
 }
 
 func contextBytes(msgs []llm.Message) int {

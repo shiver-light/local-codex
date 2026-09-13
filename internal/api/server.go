@@ -1,6 +1,7 @@
 // Package api exposes the agent over HTTP: task submission, session state,
 // SSE event streaming, approvals, git views and the file tree. It also
-// serves the built web UI from web/dist when present.
+// serves the web UI embedded in the binary, falling back to web/dist on
+// disk when the binary was built without the frontend.
 package api
 
 import (
@@ -25,6 +26,7 @@ import (
 	"local-codex/internal/permission"
 	"local-codex/internal/session"
 	"local-codex/internal/tools"
+	"local-codex/internal/webui"
 	"local-codex/internal/workspace"
 )
 
@@ -398,13 +400,19 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"tree": res.Content, "is_error": res.IsError})
 }
 
-// handleStatic serves the built React UI from web/dist when it exists.
+// handleStatic serves the web UI: the embedded build first (staged by
+// `make build`), then web/dist on disk so frontend developers can iterate
+// without recompiling the binary, then a plain-text fallback.
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if fsys, ok := webui.FS(); ok {
+		http.FileServerFS(fsys).ServeHTTP(w, r)
+		return
+	}
 	dist := "web/dist"
 	index := filepath.Join(dist, "index.html")
 	if _, err := os.Stat(index); err != nil {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "local-codex API is running.\nThe web UI is not built; run `make web` and restart.\nAPI endpoints: /api/health, /api/tasks, /api/events, /api/git/diff\n")
+		fmt.Fprintf(w, "local-codex API is running.\nThe web UI is not built; run `make build` and restart.\nAPI endpoints: /api/health, /api/tasks, /api/events, /api/git/diff\n")
 		return
 	}
 	http.FileServer(http.Dir(dist)).ServeHTTP(w, r)

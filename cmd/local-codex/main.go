@@ -87,6 +87,7 @@ func main() {
 		Temperature:        cfg.LLM.Temperature,
 		MaxTokens:          cfg.LLM.MaxTokens,
 		Stream:             cfg.LLM.Stream,
+		WorkspaceRoot:      ws.Root(),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

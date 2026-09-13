@@ -1,4 +1,8 @@
 bin/
 web/node_modules/
 web/dist/
+# Embedded UI staging dir: only the placeholder is committed; `make build`
+# copies the real frontend build in before compiling.
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
 *.log

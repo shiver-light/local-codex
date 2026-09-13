@@ -38,10 +38,16 @@ CLI / Web UI -> API Server -> Agent Loop -> LLM Client (OpenAI-compatible)
 ## Build
 
 ```sh
-make build        # produces bin/local-codex
+make build        # build the Web UI and compile bin/local-codex with the UI embedded
 make test         # run all tests
-make web          # build the Web UI into web/dist
+make web          # build only the Web UI into web/dist (frontend development)
 ```
+
+The web UI is embedded into the binary via `go:embed`, so a single
+`make build` produces a self-contained `bin/local-codex` — no separate
+`web/dist` directory is needed at runtime. During frontend development the
+server falls back to serving `web/dist` from disk when the binary was built
+without the frontend.
 
 ## Quick start (CLI, Ollama)
 
@@ -65,7 +71,7 @@ Then type a task:
 ## Quick start (Web UI)
 
 ```sh
-make web
+make build
 ./bin/local-codex --serve ./example-project
 # open http://127.0.0.1:8080
 ```
