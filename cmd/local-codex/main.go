@@ -84,6 +84,7 @@ func main() {
 		MaxContextBytes:    cfg.Agent.MaxContextBytes,
 		Temperature:        cfg.LLM.Temperature,
 		MaxTokens:          cfg.LLM.MaxTokens,
+		Stream:             cfg.LLM.Stream,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -158,12 +159,26 @@ func runTask(ctx context.Context, ag *agent.Agent, store session.Store, task str
 
 // printEvents renders the agent event stream on the terminal.
 func printEvents(events <-chan logging.Event, out io.Writer) {
+	streaming := false // an llm_delta run is open: deltas print as they arrive
 	for e := range events {
 		switch e.Type {
 		case "user_message":
 			// already echoed
+		case "llm_delta":
+			if !streaming {
+				fmt.Fprintf(out, "\n[Agent] ")
+				streaming = true
+			}
+			fmt.Fprint(out, e.Data["content"])
 		case "agent_message":
-			fmt.Fprintf(out, "\n[Agent] %s\n", e.Data["content"])
+			if streaming {
+				// the streamed deltas already printed this message; the
+				// follow-up agent_message only terminates the line
+				fmt.Fprint(out, "\n")
+				streaming = false
+			} else {
+				fmt.Fprintf(out, "\n[Agent] %s\n", e.Data["content"])
+			}
 		case "tool_call":
 			fmt.Fprintf(out, "\n[Tool] %s %s\n", e.Tool, prettyArgs(e.Tool, e.Data["args"]))
 		case "tool_result":
@@ -173,6 +188,10 @@ func printEvents(events <-chan logging.Event, out io.Writer) {
 			}
 			fmt.Fprintf(out, "[Tool Result] %s (%s, %s)\n%s\n", e.Tool, status, e.Duration, e.Data["content"])
 		case "error":
+			if streaming {
+				fmt.Fprint(out, "\n")
+				streaming = false
+			}
 			fmt.Fprintf(out, "\n[Error] %s\n", e.Data["error"])
 		case "agent_finished":
 			if e.Success != nil && !*e.Success {

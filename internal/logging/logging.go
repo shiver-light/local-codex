@@ -16,7 +16,7 @@ type Event struct {
 	Timestamp time.Time `json:"timestamp"`
 	SessionID string    `json:"session_id,omitempty"`
 	Iteration int       `json:"iteration,omitempty"`
-	Type      string    `json:"type"` // user_message, llm_request, llm_response, tool_call, tool_result, patch, command, approval, agent_message, agent_finished, error
+	Type      string    `json:"type"` // user_message, llm_request, llm_response, llm_delta, tool_call, tool_result, patch, command, approval, agent_message, agent_finished, error
 	Tool      string    `json:"tool,omitempty"`
 	Success   *bool     `json:"success,omitempty"`
 	Duration  string    `json:"duration,omitempty"`

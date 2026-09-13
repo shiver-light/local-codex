@@ -31,12 +31,16 @@ type LLMConfig struct {
 	Model       string   `yaml:"model"`
 	Temperature *float64 `yaml:"temperature"`
 	MaxTokens   int      `yaml:"max_tokens"`
+	// Stream enables streaming chat completions (llm_delta events, live
+	// token output). Enabled by default; the agent falls back to plain
+	// requests when the server rejects streaming.
+	Stream bool `yaml:"stream"`
 }
 
 type AgentConfig struct {
-	MaxIterations       int `yaml:"max_iterations"`
-	MaxRepeatToolCalls  int `yaml:"max_consecutive_repeat_tool_calls"`
-	MaxContextBytes     int `yaml:"max_context_bytes"`
+	MaxIterations      int `yaml:"max_iterations"`
+	MaxRepeatToolCalls int `yaml:"max_consecutive_repeat_tool_calls"`
+	MaxContextBytes    int `yaml:"max_context_bytes"`
 }
 
 type WorkspaceConfig struct {
@@ -63,6 +67,7 @@ func Default() *Config {
 			Model:       "qwen3-coder",
 			Temperature: &temp,
 			MaxTokens:   4096,
+			Stream:      true,
 		},
 		Agent: AgentConfig{
 			MaxIterations:      30,
@@ -109,10 +114,18 @@ func applyEnv(cfg *Config) {
 			}
 		}
 	}
+	setBool := func(env string, dst *bool) {
+		if v, ok := os.LookupEnv(env); ok && v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				*dst = b
+			}
+		}
+	}
 
 	setStr("LLM_BASE_URL", &cfg.LLM.BaseURL)
 	setStr("LLM_API_KEY", &cfg.LLM.APIKey)
 	setStr("LLM_MODEL", &cfg.LLM.Model)
+	setBool("LLM_STREAM", &cfg.LLM.Stream)
 	setInt("MAX_AGENT_ITERATIONS", &cfg.Agent.MaxIterations)
 	setInt("PORT", &cfg.Server.Port)
 	setStr("HOST", &cfg.Server.Host)

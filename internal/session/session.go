@@ -19,17 +19,27 @@ type ToolRecord struct {
 	Duration  string    `json:"duration"`
 }
 
+// UsageStats accumulates token usage and call counts across all LLM
+// requests of a session.
+type UsageStats struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	LLMCalls         int `json:"llm_calls"`
+}
+
 // Session is one coding task.
 type Session struct {
-	ID            string           `json:"id"`
-	Task          string           `json:"task"`
-	CreatedAt     time.Time        `json:"created_at"`
-	Messages      []llm.Message    `json:"messages"`
-	ToolHistory   []ToolRecord     `json:"tool_history"`
-	ModifiedFiles []string         `json:"modified_files"`
-	Commands      []string         `json:"commands"`
-	FinalAnswer   string           `json:"final_answer,omitempty"`
-	Done          bool             `json:"done"`
+	ID            string        `json:"id"`
+	Task          string        `json:"task"`
+	CreatedAt     time.Time     `json:"created_at"`
+	Messages      []llm.Message `json:"messages"`
+	ToolHistory   []ToolRecord  `json:"tool_history"`
+	ModifiedFiles []string      `json:"modified_files"`
+	Commands      []string      `json:"commands"`
+	Usage         UsageStats    `json:"usage"`
+	FinalAnswer   string        `json:"final_answer,omitempty"`
+	Done          bool          `json:"done"`
 	mu            sync.Mutex
 }
 
@@ -84,6 +94,18 @@ func (s *Session) Finish(answer string) {
 	s.mu.Unlock()
 }
 
+// AddUsage accumulates one LLM response's usage. The call count always
+// increments; token counters only grow when the server reported usage
+// (some streaming servers omit it).
+func (s *Session) AddUsage(u llm.Usage) {
+	s.mu.Lock()
+	s.Usage.LLMCalls++
+	s.Usage.PromptTokens += u.PromptTokens
+	s.Usage.CompletionTokens += u.CompletionTokens
+	s.Usage.TotalTokens += u.TotalTokens
+	s.mu.Unlock()
+}
+
 // Snapshot returns a deep copy of the session taken under the lock. Readers
 // (e.g. HTTP handlers marshaling to JSON) must use it instead of touching
 // the live session, which the agent goroutine mutates concurrently.
@@ -94,6 +116,7 @@ func (s *Session) Snapshot() *Session {
 		ID:          s.ID,
 		Task:        s.Task,
 		CreatedAt:   s.CreatedAt,
+		Usage:       s.Usage,
 		FinalAnswer: s.FinalAnswer,
 		Done:        s.Done,
 	}

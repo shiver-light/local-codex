@@ -91,6 +91,7 @@ YAML (`config/config.yaml`) plus environment variables; **env wins**.
 | `LLM_BASE_URL` | `llm.base_url` | `http://127.0.0.1:11434/v1` |
 | `LLM_API_KEY` | `llm.api_key` | `ollama` |
 | `LLM_MODEL` | `llm.model` | `qwen3-coder` |
+| `LLM_STREAM` | `llm.stream` | `true` |
 | `MAX_AGENT_ITERATIONS` | `agent.max_iterations` | `30` |
 | `PORT` | `server.port` | `8080` |
 | `LOCAL_CODEX_TOKEN` | `server.token` | *(random per startup)* |
@@ -166,7 +167,12 @@ your own wiring code. The agent loop picks it up automatically.
 - [x] CLI agent loop with tool calling
 - [x] Web UI with live events, approvals, git diff view
 - [ ] SQLite session store
-- [ ] Streaming LLM responses
+- [x] Streaming LLM responses (`llm.stream`): content deltas are broadcast as
+  `llm_delta` SSE events (think blocks filtered) and rendered live in the CLI
+  and web UI; mid-stream failures abort instead of retrying so streamed text
+  is never repeated. Token usage accumulates per session (`usage` in
+  `GET /api/sessions/{id}`, shown in the web top bar) whenever the server
+  reports it.
 - [ ] Docker / SSH / GDB tools
 - [ ] Multi-session Web UI
 

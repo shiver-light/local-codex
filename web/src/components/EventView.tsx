@@ -18,6 +18,18 @@ export function EventView({ event: e }: { event: AgentEvent }) {
           <div className="bubble pre">{String(e.data?.content ?? "")}</div>
         </div>
       );
+    case "llm_delta":
+      // Live stream of the assistant reply (deltas are think-filtered by the
+      // backend). Aggregated per iteration by App.
+      return (
+        <div className="msg agent">
+          <div className="role">Agent</div>
+          <div className="bubble pre">
+            {String(e.data?.content ?? "")}
+            <span className="cursor">▍</span>
+          </div>
+        </div>
+      );
     case "tool_call":
       return (
         <div className="tool-call">

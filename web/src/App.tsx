@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AgentEvent, api, eventsURL, getToken, setToken } from "./api";
+import { AgentEvent, api, eventsURL, getToken, setToken, UsageStats } from "./api";
 import { EventView } from "./components/EventView";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { SidePanel } from "./components/SidePanel";
@@ -9,6 +9,7 @@ export default function App() {
   const [task, setTask] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [usage, setUsage] = useState<UsageStats | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<
     { id: string; command: string; reason: string }[]
   >([]);
@@ -34,8 +35,19 @@ export default function App() {
     };
     es.onopen = refreshApprovals;
     refreshApprovals();
+    const refreshUsage = () => {
+      if (!sessionId) return;
+      api
+        .getSession(sessionId)
+        .then((s) => setUsage(s.usage ?? null))
+        .catch(() => {
+          // transient; the next llm_response/agent_finished refreshes again
+        });
+    };
     const types = [
       "user_message",
+      "llm_delta",
+      "llm_response",
       "agent_message",
       "tool_call",
       "tool_result",
@@ -47,6 +59,51 @@ export default function App() {
       es.addEventListener(t, (ev) => {
         const e = JSON.parse((ev as MessageEvent).data) as AgentEvent;
         if (sessionId && e.session_id && e.session_id !== sessionId) return;
+        if (e.type === "llm_delta") {
+          // Aggregate deltas of one iteration into a single growing bubble.
+          setEvents((prev) => {
+            const last = prev[prev.length - 1];
+            const chunk = String(e.data?.content ?? "");
+            if (
+              last?.type === "llm_delta" &&
+              last.session_id === e.session_id &&
+              last.iteration === e.iteration
+            ) {
+              const merged = {
+                ...last,
+                data: {
+                  ...last.data,
+                  content: String(last.data?.content ?? "") + chunk,
+                },
+              };
+              return [...prev.slice(0, -1), merged];
+            }
+            return [...prev.slice(-500), { ...e, data: { ...e.data, content: chunk } }];
+          });
+          return;
+        }
+        if (e.type === "agent_message") {
+          setEvents((prev) => {
+            const last = prev[prev.length - 1];
+            // The agent_message that closes a streamed iteration repeats the
+            // text already shown via llm_delta: swap it in to drop the
+            // "generating" styling instead of printing the message twice.
+            if (
+              last?.type === "llm_delta" &&
+              last.session_id === e.session_id &&
+              last.iteration === e.iteration &&
+              String(last.data?.content ?? "").trim() ===
+                String(e.data?.content ?? "").trim()
+            ) {
+              return [...prev.slice(0, -1), e];
+            }
+            return [...prev.slice(-500), e];
+          });
+          return;
+        }
+        if (e.type === "llm_response" || e.type === "agent_finished") {
+          refreshUsage();
+        }
         if (e.type === "approval") {
           // The broadcast carries only the approval id; fetch the full
           // request (command, reason) from the API.
@@ -90,6 +147,7 @@ export default function App() {
     const text = task.trim();
     if (!text || running) return;
     setEvents([]);
+    setUsage(null);
     setRunning(true);
     setTask("");
     try {
@@ -132,6 +190,14 @@ export default function App() {
         <span className={running ? "status running" : "status"}>
           {running ? "● agent running" : "○ idle"}
         </span>
+        {usage && usage.llm_calls > 0 && (
+          <span
+            className="usage"
+            title={`prompt ${usage.prompt_tokens} + completion ${usage.completion_tokens} tokens`}
+          >
+            {usage.total_tokens} tok · {usage.llm_calls} calls
+          </span>
+        )}
         <button className="token-btn" onClick={editToken} title="Set API token">
           token
         </button>

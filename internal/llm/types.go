@@ -60,6 +60,20 @@ type ChatRequest struct {
 	Temperature *float64  `json:"temperature,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
+	// StreamOptions asks the server for a final usage chunk when streaming.
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+}
+
+// StreamOptions controls streaming behavior (OpenAI-compatible).
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// Delta is one streamed increment of the assistant reply. Tool-call
+// increments are aggregated internally and not reported through Delta.
+type Delta struct {
+	Content          string
+	ReasoningContent string
 }
 
 type Choice struct {
@@ -91,4 +105,14 @@ func (r *ChatResponse) First() *Message {
 type Client interface {
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 	Model() string
+}
+
+// StreamClient is implemented by clients that support SSE streaming. The
+// agent type-asserts for it and falls back to Chat when absent.
+//
+// onDelta is invoked for every content/reasoning increment as it arrives.
+// The returned ChatResponse carries the fully aggregated message and, when
+// the server provides it, the token usage.
+type StreamClient interface {
+	ChatStream(ctx context.Context, req ChatRequest, onDelta func(Delta)) (*ChatResponse, error)
 }

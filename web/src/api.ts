@@ -8,6 +8,7 @@ export interface AgentEvent {
     | "user_message"
     | "llm_request"
     | "llm_response"
+    | "llm_delta"
     | "tool_call"
     | "tool_result"
     | "agent_message"
@@ -18,6 +19,14 @@ export interface AgentEvent {
   success?: boolean;
   duration?: string;
   data?: Record<string, unknown>;
+}
+
+// UsageStats mirrors the Go session.UsageStats accumulator.
+export interface UsageStats {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  llm_calls: number;
 }
 
 export interface ToolRecord {
@@ -34,6 +43,7 @@ export interface Session {
   created_at: string;
   tool_history: ToolRecord[];
   modified_files: string[];
+  usage?: UsageStats;
   final_answer?: string;
   done: boolean;
 }

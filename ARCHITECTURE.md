@@ -49,11 +49,27 @@ The core loop (`internal/agent/loop.go`):
 5. Stop conditions: `max_iterations` reached, repeated identical tool calls,
    context cancellation, or context budget exceeded.
 
+### Streaming and token usage
+
+When `llm.stream` is on (default) and the LLM client implements
+`llm.StreamClient`, chat completions are streamed as SSE: each content
+increment is published as an `llm_delta` event (session id + iteration, think
+blocks filtered out by an incremental filter) so the CLI and web UI render
+output live. Tool-call increments are aggregated internally (merged by
+`index`) and only enter the flow once the message is complete. Retry
+semantics: a streaming failure before the first delta falls back to a plain
+request and follows the normal retry policy; a failure after deltas were
+delivered aborts without retry so users never see repeated text. Token usage
+from each response is accumulated into the session (`usage.prompt_tokens` /
+`completion_tokens` / `total_tokens` / `llm_calls`) when the server reports
+it (streaming clients request a final usage chunk via
+`stream_options.include_usage`).
+
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `internal/llm` | OpenAI-compatible `/v1/chat/completions` client; provider-agnostic interface |
+| `internal/llm` | OpenAI-compatible `/v1/chat/completions` client (plain + SSE streaming via `ChatStream`); provider-agnostic interface |
 | `internal/tools` | Tool interface, registry, and built-in tools (files, search, patch, shell, git) |
 | `internal/workspace` | Workspace root; all file paths are resolved and confined inside it |
 | `internal/permission` | Shell command policy (`safe` / `ask` / `blocked`) and approval flow |

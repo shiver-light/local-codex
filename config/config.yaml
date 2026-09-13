@@ -11,6 +11,10 @@ llm:
   model: qwen3-coder
   temperature: 0.2
   max_tokens: 4096
+  # Stream chat completions (SSE): live token output via llm_delta events.
+  # Disable if your server misbehaves in stream mode; the agent also falls
+  # back to plain requests automatically when streaming fails to start.
+  stream: true
 
 agent:
   max_iterations: 30

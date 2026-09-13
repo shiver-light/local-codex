@@ -36,6 +36,11 @@ type Agent struct {
 	Temperature *float64
 	MaxTokens   int
 
+	// Stream enables streaming chat completions with llm_delta events when
+	// the LLM client supports it (llm.StreamClient). On a connection-phase
+	// streaming failure the agent falls back to a plain request.
+	Stream bool
+
 	// retryBackoff is the initial retry delay; tests shrink it.
 	retryBackoff time.Duration
 }
@@ -90,6 +95,7 @@ func (a *Agent) Run(ctx context.Context, sess *session.Session, task string) (st
 		if msg == nil {
 			return "", fmt.Errorf("llm returned empty response (iteration %d)", iter)
 		}
+		sess.AddUsage(resp.Usage)
 		// Drop thinking-model reasoning so it never bloats the history or
 		// leaks into the final answer; also drop server-side reasoning
 		// fields before the message is stored.
@@ -214,12 +220,12 @@ func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, iter 
 		if err := ctx.Err(); err != nil {
 			return nil, time.Since(start), err
 		}
-		resp, err := a.LLM.Chat(ctx, llm.ChatRequest{
+		resp, err := a.callLLM(ctx, llm.ChatRequest{
 			Messages:    messages,
 			Tools:       a.Registry.Definitions(),
 			Temperature: a.Temperature,
 			MaxTokens:   a.MaxTokens,
-		})
+		}, iter, sessionID)
 		if err == nil {
 			return resp, time.Since(start), nil
 		}
@@ -255,9 +261,54 @@ func (a *Agent) chatWithRetry(ctx context.Context, messages []llm.Message, iter 
 	return nil, time.Since(start), fmt.Errorf("llm failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
+// streamError wraps a failure that happened after streaming had already
+// begun: deltas were already delivered to subscribers, so retrying would
+// repeat output the user has seen. It is never retried.
+type streamError struct{ err error }
+
+func (e *streamError) Error() string { return e.err.Error() }
+func (e *streamError) Unwrap() error { return e.err }
+
+// callLLM performs one chat request, streaming when enabled and supported.
+// Each content delta is broadcast as an llm_delta event (think blocks
+// filtered out). A streaming failure before the first delta falls back to a
+// plain request; a failure mid-stream aborts without retry.
+func (a *Agent) callLLM(ctx context.Context, req llm.ChatRequest, iter int, sessionID string) (*llm.ChatResponse, error) {
+	sc, ok := a.LLM.(llm.StreamClient)
+	if !a.Stream || !ok {
+		return a.LLM.Chat(ctx, req)
+	}
+	streamStarted := false
+	filter := &thinkFilter{}
+	resp, err := sc.ChatStream(ctx, req, func(d llm.Delta) {
+		streamStarted = true
+		if d.Content == "" {
+			return // reasoning deltas are never broadcast
+		}
+		if text := filter.feed(d.Content); text != "" {
+			a.emit(logging.Event{Type: "llm_delta", SessionID: sessionID, Iteration: iter,
+				Data: map[string]any{"content": text}})
+		}
+	})
+	if err == nil {
+		return resp, nil
+	}
+	if streamStarted {
+		return nil, &streamError{err}
+	}
+	// Streaming failed before any output (e.g. the server does not support
+	// stream mode): fall back to a plain request for this attempt.
+	return a.LLM.Chat(ctx, req)
+}
+
 // retryableErr reports whether the failure is worth retrying: network
-// errors and 429/5xx are transient; other 4xx are deterministic.
+// errors and 429/5xx are transient; other 4xx are deterministic. Mid-stream
+// failures are never retried (partial output was already delivered).
 func retryableErr(err error) bool {
+	var serr *streamError
+	if errors.As(err, &serr) {
+		return false
+	}
 	var httpErr *llm.HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= 500
