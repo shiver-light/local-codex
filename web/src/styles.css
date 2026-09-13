@@ -1,0 +1,117 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #161a22;
+  --border: #262c38;
+  --text: #d7dce3;
+  --dim: #8b93a3;
+  --accent: #4f8cff;
+  --ok: #3fb96c;
+  --fail: #e5534b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.layout { display: flex; flex-direction: column; height: 100vh; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.logo { font-weight: 700; letter-spacing: 0.5px; }
+.status { color: var(--dim); font-size: 12px; }
+.status.running { color: var(--accent); }
+
+.main { display: flex; flex: 1; min-height: 0; }
+
+.sidebar {
+  width: 380px; min-width: 280px; border-right: 1px solid var(--border);
+  background: var(--panel); display: flex; flex-direction: column;
+}
+.sidepanel { display: flex; flex-direction: column; height: 100%; }
+.tabs { display: flex; border-bottom: 1px solid var(--border); }
+.tabs button {
+  flex: 0 0 auto; padding: 8px 14px; background: none; border: none;
+  color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent;
+}
+.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+.tabs .refresh { margin-left: auto; }
+.tree, .gitview { overflow: auto; padding: 12px; margin: 0; flex: 1; }
+.tree { font: 12px/1.5 ui-monospace, monospace; white-space: pre; }
+.status { color: var(--ok); font: 12px ui-monospace, monospace; margin: 0 0 8px; }
+.diff { font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; margin: 0; }
+
+.chat { flex: 1; overflow-y: auto; padding: 16px 20px; }
+.empty { color: var(--dim); text-align: center; margin-top: 20vh; }
+
+.msg { margin-bottom: 14px; max-width: 860px; }
+.msg .role { font-size: 11px; color: var(--dim); margin-bottom: 4px; text-transform: uppercase; }
+.msg.user { margin-left: auto; }
+.bubble {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 14px; white-space: pre-wrap;
+}
+.msg.user .bubble { background: #1c2b45; }
+.bubble.pre { font-size: 13px; }
+
+.tool-call {
+  font: 12px ui-monospace, monospace; color: var(--accent);
+  margin: 8px 0 2px;
+}
+.tool-name { font-weight: 600; margin-right: 8px; }
+.tool-args { color: var(--dim); word-break: break-all; }
+
+.tool-result {
+  margin: 0 0 10px 18px; font: 12px ui-monospace, monospace;
+}
+.tool-result summary { cursor: pointer; color: var(--ok); }
+.tool-result.failed summary { color: var(--fail); }
+.tool-result pre {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px; overflow-x: auto;
+  white-space: pre-wrap; max-height: 320px; overflow-y: auto;
+}
+
+.error { color: var(--fail); margin: 8px 0; }
+.finished { color: var(--ok); margin: 12px 0; font-weight: 600; }
+.finished.failed { color: var(--fail); }
+
+.approval {
+  border: 1px solid #b98900; background: #241d07; border-radius: 8px;
+  padding: 12px 14px; margin: 12px 0; max-width: 640px;
+}
+.approval-title { font-weight: 600; margin-bottom: 6px; }
+.approval-cmd {
+  display: block; background: #000; padding: 8px; border-radius: 4px;
+  font: 13px ui-monospace, monospace; margin-bottom: 6px;
+}
+.approval-reason { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+.approval-actions button {
+  margin-right: 8px; padding: 6px 18px; border-radius: 6px;
+  border: none; cursor: pointer; font-weight: 600;
+}
+.approve { background: var(--ok); color: #06281_2; color: #04180c; }
+.reject { background: var(--fail); color: #2a0603; }
+
+.composer {
+  display: flex; gap: 10px; padding: 12px 16px;
+  border-top: 1px solid var(--border); background: var(--panel);
+}
+.composer textarea {
+  flex: 1; resize: none; height: 56px; padding: 8px 10px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; font: inherit;
+}
+.composer button {
+  padding: 0 22px; border-radius: 8px; border: none;
+  background: var(--accent); color: #fff; font-weight: 600; cursor: pointer;
+}
+.composer button:disabled { opacity: 0.4; cursor: default; }

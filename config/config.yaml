@@ -1,0 +1,25 @@
+server:
+  port: 8080
+  host: 127.0.0.1
+
+llm:
+  base_url: http://127.0.0.1:11435/v1
+  api_key: ollama
+  model: qwen3-coder
+  temperature: 0.2
+  max_tokens: 4096
+
+agent:
+  max_iterations: 30
+  max_consecutive_repeat_tool_calls: 3
+
+workspace:
+  root: .
+
+shell:
+  default_timeout: 120
+  max_timeout: 600
+
+logging:
+  level: info
+  file: ""
