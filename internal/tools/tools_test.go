@@ -149,8 +149,8 @@ func TestRunCommand(t *testing.T) {
 	}
 
 	// failing command: exit code captured, marked as error for the agent
-	res, _ = tool.Execute(context.Background(), json.RawMessage(`{"command":"echo oops >&2; exit 3"}`))
-	if !res.IsError || !strings.Contains(res.Content, "exit_code: 3") || !strings.Contains(res.Content, "oops") {
+	res, _ = tool.Execute(context.Background(), json.RawMessage(`{"command":"echo oops >&2; grep -q oops /dev/null"}`))
+	if !res.IsError || !strings.Contains(res.Content, "exit_code: 1") || !strings.Contains(res.Content, "oops") {
 		t.Errorf("expected failure capture:\n%s", res.Content)
 	}
 
@@ -167,7 +167,7 @@ func TestRunCommand(t *testing.T) {
 	}
 
 	// timeout
-	res, _ = tool.Execute(context.Background(), json.RawMessage(`{"command":"sleep 5","timeout":1}`))
+	res, _ = tool.Execute(context.Background(), json.RawMessage(`{"command":"tail -f /dev/null","timeout":1}`))
 	if !strings.Contains(res.Content, "timed_out: true") {
 		t.Errorf("expected timeout:\n%s", res.Content)
 	}
@@ -201,7 +201,7 @@ func TestGitTools(t *testing.T) {
 	ws := testWorkspace(t)
 	git := func(args ...string) {
 		t.Helper()
-		tool := &RunCommandTool{Exec: &Executor{WS: ws, Policy: permission.DefaultPolicy(), DefaultTimeout: 10_000_000_000}}
+		tool := &RunCommandTool{Exec: &Executor{WS: ws, Policy: permission.DefaultPolicy(), DefaultTimeout: 10_000_000_000}, Approver: permission.ApproveAll{}}
 		res, _ := tool.Execute(context.Background(), json.RawMessage(
 			`{"command":"git `+strings.Join(args, " ")+`"}`))
 		if res.IsError {

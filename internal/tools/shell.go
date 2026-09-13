@@ -95,7 +95,7 @@ type RunCommandTool struct {
 
 func (t *RunCommandTool) Name() string { return "run_command" }
 func (t *RunCommandTool) Description() string {
-	return "Run a shell command inside the workspace (e.g. builds and tests: `go test ./...`, `npm test`, `cmake --build build`). Returns stdout, stderr and the exit code. Dangerous commands may require user approval or be refused."
+	return "Run a shell command inside the workspace (e.g. read-only commands and builds/tests like `go test ./...`). Returns stdout, stderr and the exit code. Interpreters, package managers, git mutations and unknown commands require user approval; destructive commands are refused."
 }
 func (t *RunCommandTool) Schema() map[string]any {
 	return map[string]any{

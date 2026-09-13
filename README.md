@@ -125,11 +125,24 @@ your own wiring code. The agent loop picks it up automatically.
 
 - All file paths are resolved against the workspace root; `..`, absolute paths
   outside the root, and symlink escapes are rejected.
-- Shell commands are classified by `CommandPolicy`:
-  - `safe`: git, go, make, cmake, ninja, ctest, rg, grep, cat, ls, node, npm, python...
-  - `ask`: docker, ssh, scp, curl, wget, apt... (require user approval)
-  - `blocked`: sudo, shutdown, reboot, mkfs, dd...
-  - obviously destructive patterns (`rm -rf /`, fork bombs, ...) are refused.
+- Shell commands are parsed into a syntax tree (`mvdan.cc/sh`) and every
+  command that would execute — including pipelines, multi-line scripts,
+  command substitutions and commands wrapped by `env`/`nohup` — is classified
+  by `permission.Policy`:
+  - `safe`: read-only commands (`ls`, `cat`, `head`, `tail`, `wc`, `rg`,
+    `grep`, `find` without `-delete`/`-exec`, `diff`, ...), read-only git
+    subcommands (`status`, `diff`, `log`, `show`, ...), and
+    `go build`/`test`/`vet`/`list`/... (these can execute arbitrary code —
+    accepted tradeoff for a coding agent; see policy source comments).
+  - `ask` (require user approval): everything else — interpreters and build
+    tools (`python`, `node`, `make`, `npm`, `pip`, `cargo`, ...), git write
+    subcommands (`push`, `clean`, `reset --hard`, ...), network tools
+    (`curl`, `ssh`, `docker`, ...), wrappers like `xargs`, and anything the
+    parser cannot resolve statically.
+  - `blocked`: `sudo`, `shutdown`, `reboot`, `mkfs*`, `dd`, mounts, plus
+    recursive force `rm` whose target contains `/`, `~` or `*` (detected on
+    parsed argv, so whitespace/flag variants cannot bypass it), writes to
+    `/dev/*`, and fork bombs.
 - The agent never runs `git commit` / `git push` unless explicitly asked.
 - API keys are never written to logs.
 

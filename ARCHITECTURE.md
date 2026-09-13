@@ -89,9 +89,14 @@ Built-in tools: `list_files`, `read_file`, `search_code`, `apply_patch`,
 - **Workspace confinement**: every file path passed to a tool is resolved
   (symlinks evaluated) and must stay under the workspace root. Absolute paths
   outside the root, `..` escapes, and symlink escapes are rejected.
-- **Shell policy**: commands are classified `safe` (run directly), `ask`
-  (require user approval via CLI prompt or web approval API), or `blocked`
-  (always refused). Dangerous patterns (e.g. `rm -rf /`) are refused outright.
+- **Shell policy**: commands are parsed with `mvdan.cc/sh` and every command
+  in the syntax tree (including command substitutions and multi-line scripts)
+  is classified `safe` (read-only commands, read-only git subcommands,
+  `go build`/`test`/`vet`), `ask` (require user approval via CLI prompt or
+  web approval API — the default for interpreters, build tools, git writes,
+  unknown programs and anything unparseable), or `blocked` (always refused:
+  sudo/dd/mkfs-style programs, `rm -rf` on targets containing `/`, `~` or
+  `*`, `/dev/*` writes, fork bombs).
 - **No implicit git mutations**: the agent never commits or pushes unless the
   user explicitly asks.
 
