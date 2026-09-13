@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Approver decides whether an "ask" command may run.
@@ -66,6 +67,11 @@ type Request struct {
 	Reason  string `json:"reason"`
 }
 
+// DefaultApprovalTimeout bounds how long Approve waits for a resolution
+// before auto-rejecting, so a request with no connected client cannot hang
+// the task until the hard task timeout.
+const DefaultApprovalTimeout = 5 * time.Minute
+
 // BrokerApprover fans approval requests out to subscribers (e.g. over SSE)
 // and blocks until someone resolves them via Resolve.
 type BrokerApprover struct {
@@ -73,6 +79,9 @@ type BrokerApprover struct {
 	pending  map[string]chan bool
 	requests map[string]Request // full requests, fetchable by id via Pending
 	onNewReq func(Request)      // called when a new approval is requested
+	// Timeout bounds the wait for a resolution; zero uses
+	// DefaultApprovalTimeout. A timed-out request is auto-rejected.
+	Timeout time.Duration
 }
 
 func NewBrokerApprover(onNew func(Request)) *BrokerApprover {
@@ -107,9 +116,18 @@ func (b *BrokerApprover) Approve(ctx context.Context, command string, reason str
 		b.mu.Unlock()
 	}()
 
+	timeout := b.Timeout
+	if timeout <= 0 {
+		timeout = DefaultApprovalTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
+	case <-timer.C:
+		return false, nil // nobody resolved in time: auto-reject
 	case ok := <-ch:
 		return ok, nil
 	}
@@ -123,14 +141,36 @@ func (b *BrokerApprover) Pending(id string) (Request, bool) {
 	return r, ok
 }
 
-// Resolve answers a pending approval. Returns false if the id is unknown.
+// ListPending returns every still-open approval request, so clients that
+// (re)connect after the broadcast missed the event can recover them.
+func (b *BrokerApprover) ListPending() []Request {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]Request, 0, len(b.requests))
+	for _, r := range b.requests {
+		out = append(out, r)
+	}
+	return out
+}
+
+// Resolve answers a pending approval. Returns false if the id is unknown or
+// was already resolved: the entry is deleted under the lock before the
+// (non-blocking, buffered) send, so a duplicate Resolve observes it as gone
+// instead of blocking the caller on a channel nobody drains anymore.
 func (b *BrokerApprover) Resolve(id string, approved bool) bool {
 	b.mu.Lock()
 	ch, ok := b.pending[id]
+	if ok {
+		delete(b.pending, id)
+		delete(b.requests, id)
+	}
 	b.mu.Unlock()
 	if !ok {
 		return false
 	}
-	ch <- approved
+	select {
+	case ch <- approved:
+	default:
+	}
 	return true
 }

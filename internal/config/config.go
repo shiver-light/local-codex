@@ -85,6 +85,9 @@ func Load(path string) (*Config, error) {
 			if !os.IsNotExist(err) {
 				return nil, fmt.Errorf("read config %s: %w", path, err)
 			}
+			// The default path is relative to the CWD; say so out loud when
+			// we silently fall back to built-in defaults.
+			fmt.Fprintf(os.Stderr, "local-codex: config %s not found; using built-in defaults (env vars still override)\n", path)
 		} else if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}

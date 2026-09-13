@@ -165,9 +165,7 @@ func printEvents(events <-chan logging.Event, out io.Writer) {
 		case "agent_message":
 			fmt.Fprintf(out, "\n[Agent] %s\n", e.Data["content"])
 		case "tool_call":
-			args, _ := json.Marshal(e.Data["args"])
 			fmt.Fprintf(out, "\n[Tool] %s %s\n", e.Tool, prettyArgs(e.Tool, e.Data["args"]))
-			_ = args
 		case "tool_result":
 			status := "ok"
 			if e.Success != nil && !*e.Success {

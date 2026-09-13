@@ -276,3 +276,193 @@ func TestEventsSSE(t *testing.T) {
 		t.Error("timed out waiting for SSE events")
 	}
 }
+
+func TestListApprovalsEndpoint(t *testing.T) {
+	ts, srv := newTestServer(t)
+	defer ts.Close()
+
+	// Open a pending approval directly on the broker approver.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _, _ = srv.approver.Approve(ctx, "rm -rf build", "destructive") }()
+
+	var list []map[string]string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := authed(t, "GET", ts.URL+"/api/approvals", "")
+		list = nil
+		json.NewDecoder(resp.Body).Decode(&list)
+		resp.Body.Close()
+		if len(list) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(list) != 1 {
+		t.Fatalf("GET /api/approvals = %+v, want 1 pending", list)
+	}
+	if list[0]["command"] != "rm -rf build" || list[0]["reason"] != "destructive" || list[0]["id"] == "" {
+		t.Errorf("unexpected pending approval: %+v", list[0])
+	}
+
+	// After the waiter goes away, the list must be empty again.
+	cancel()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp := authed(t, "GET", ts.URL+"/api/approvals", "")
+		list = nil
+		json.NewDecoder(resp.Body).Decode(&list)
+		resp.Body.Close()
+		if len(list) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("approval still listed after cancellation: %+v", list)
+}
+
+// blockingLLM hangs in Chat until its context is cancelled.
+type blockingLLM struct{ started chan struct{} }
+
+func (b *blockingLLM) Model() string { return "blocking" }
+func (b *blockingLLM) Chat(ctx context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func newBlockingServer(t *testing.T) (*httptest.Server, *Server, *blockingLLM) {
+	t.Helper()
+	ws, err := workspace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Server.Token = testToken
+	m := &blockingLLM{started: make(chan struct{})}
+	ag := &agent.Agent{
+		LLM:    m,
+		Broker: agent.NewEventBroker(),
+	}
+	srv := NewServer(cfg, ws, ag, session.NewMemoryStore())
+	return httptest.NewServer(srv.http.Handler), srv, m
+}
+
+func TestCancelTask(t *testing.T) {
+	ts, srv, m := newBlockingServer(t)
+	defer ts.Close()
+
+	resp := authed(t, "POST", ts.URL+"/api/tasks", `{"task":"hang"}`)
+	var created struct {
+		SessionID string `json:"session_id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	if created.SessionID == "" {
+		t.Fatal("no session id returned")
+	}
+
+	// Wait until the agent is actually blocked inside the LLM call.
+	select {
+	case <-m.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent never reached the LLM call")
+	}
+
+	resp = authed(t, "POST", ts.URL+"/api/tasks/"+created.SessionID+"/cancel", "")
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("cancel status = %d, want 200", resp.StatusCode)
+	}
+
+	// Once the task goroutine unwinds, the cancel func is deregistered.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp = authed(t, "POST", ts.URL+"/api/tasks/"+created.SessionID+"/cancel", "")
+		resp.Body.Close()
+		if resp.StatusCode == 404 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("cancel after finish: status = %d, want 404", resp.StatusCode)
+	}
+	_ = srv
+}
+
+func TestErrorEmitsAgentFinished(t *testing.T) {
+	ts, srv, m := newBlockingServer(t)
+	defer ts.Close()
+
+	events, unsubscribe := srv.broker.Subscribe()
+	defer unsubscribe()
+
+	resp := authed(t, "POST", ts.URL+"/api/tasks", `{"task":"hang"}`)
+	resp.Body.Close()
+	select {
+	case <-m.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent never reached the LLM call")
+	}
+	resp = authed(t, "POST", ts.URL+"/api/tasks/"+sessionIDOf(t, ts)+"/cancel", "")
+	resp.Body.Close()
+
+	// The UI resets its running state only on agent_finished; a task that
+	// dies with an error must emit one.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-events:
+			if e.Type == "agent_finished" {
+				if e.Success == nil || *e.Success {
+					t.Fatalf("agent_finished success = %v, want false", e.Success)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no agent_finished after task error")
+		}
+	}
+}
+
+func sessionIDOf(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	resp := authed(t, "GET", ts.URL+"/api/sessions", "")
+	defer resp.Body.Close()
+	var sessions []session.Session
+	json.NewDecoder(resp.Body).Decode(&sessions)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %+v", sessions)
+	}
+	return sessions[0].ID
+}
+
+func TestEventsSSEHeartbeat(t *testing.T) {
+	ts, srv := newTestServer(t)
+	defer ts.Close()
+	srv.sseHeartbeat = 30 * time.Millisecond
+
+	resp := authed(t, "GET", ts.URL+"/api/events", "")
+	defer resp.Body.Close()
+
+	buf := make([]byte, 4096)
+	var got string
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(got, ": ping") && time.Now().Before(deadline) {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			got += string(buf[:n])
+		}
+		if err != nil {
+			t.Fatalf("read SSE: %v (got %q)", err, got)
+		}
+	}
+	if !strings.Contains(got, ": ping") {
+		t.Errorf("no heartbeat within %v, got %q", 2*time.Second, got)
+	}
+}

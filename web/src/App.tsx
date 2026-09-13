@@ -18,6 +18,22 @@ export default function App() {
   // Global SSE stream: append events, track approvals and completion.
   useEffect(() => {
     const es = new EventSource(eventsURL());
+    // Recover approvals that were requested while we were disconnected
+    // (page load, SSE reconnect): the broadcast is delivered only once.
+    const refreshApprovals = () => {
+      api
+        .listApprovals()
+        .then((list) =>
+          setPendingApprovals(
+            list.map((r) => ({ id: r.id, command: r.command, reason: r.reason }))
+          )
+        )
+        .catch(() => {
+          // unauthorized or transient failure; the approval events still work
+        });
+    };
+    es.onopen = refreshApprovals;
+    refreshApprovals();
     const types = [
       "user_message",
       "agent_message",
@@ -54,6 +70,11 @@ export default function App() {
         if (e.type === "agent_finished") {
           setRunning(false);
           setRightTab("diff");
+        }
+        if (e.type === "error" && e.data?.retry !== true) {
+          // A non-retry error ends the task; the backend also emits
+          // agent_finished, this is a belt-and-braces reset.
+          setRunning(false);
         }
         setEvents((prev) => [...prev.slice(-500), e]);
       });

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"local-codex/internal/agent"
@@ -43,6 +44,12 @@ type Server struct {
 	// are rejected with 429. Sized by maxConcurrentTasks.
 	taskSem            chan struct{}
 	maxConcurrentTasks int
+	// cancels holds the cancel func of each running task, keyed by session
+	// id, so POST /api/tasks/{id}/cancel can abort it.
+	cancelMu sync.Mutex
+	cancels  map[string]context.CancelFunc
+	// sseHeartbeat is the interval between SSE comment pings; tests shrink it.
+	sseHeartbeat time.Duration
 }
 
 func NewServer(cfg *config.Config, ws *workspace.Workspace, ag *agent.Agent, store session.Store) *Server {
@@ -58,6 +65,8 @@ func NewServer(cfg *config.Config, ws *workspace.Workspace, ag *agent.Agent, sto
 		broker:             ag.Broker,
 		token:              token,
 		maxConcurrentTasks: 4,
+		cancels:            map[string]context.CancelFunc{},
+		sseHeartbeat:       15 * time.Second,
 	}
 	s.taskSem = make(chan struct{}, s.maxConcurrentTasks)
 	// Approvals requested by tools are published as events so the web UI can
@@ -77,10 +86,12 @@ func NewServer(cfg *config.Config, ws *workspace.Workspace, ag *agent.Agent, sto
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("GET /api/health", s.handleHealth)
 	apiMux.HandleFunc("POST /api/tasks", s.handleCreateTask)
+	apiMux.HandleFunc("POST /api/tasks/{id}/cancel", s.handleCancelTask)
 	apiMux.HandleFunc("GET /api/sessions", s.handleListSessions)
 	apiMux.HandleFunc("GET /api/sessions/{id}", s.handleGetSession)
 	apiMux.HandleFunc("GET /api/events", s.handleEvents)
 	apiMux.HandleFunc("POST /api/approvals", s.handleApproval)
+	apiMux.HandleFunc("GET /api/approvals", s.handleListApprovals)
 	apiMux.HandleFunc("GET /api/approvals/{id}", s.handleGetApproval)
 	apiMux.HandleFunc("GET /api/git/status", s.handleGitStatus)
 	apiMux.HandleFunc("GET /api/git/diff", s.handleGitDiff)
@@ -192,6 +203,8 @@ func writeErr(w http.ResponseWriter, status int, format string, args ...any) {
 	writeJSON(w, status, map[string]string{"error": fmt.Sprintf(format, args...)})
 }
 
+func boolPtr(b bool) *bool { return &b }
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
@@ -215,11 +228,27 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() { <-s.taskSem }()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
+		s.cancelMu.Lock()
+		s.cancels[sess.ID] = cancel
+		s.cancelMu.Unlock()
+		defer func() {
+			cancel()
+			s.cancelMu.Lock()
+			delete(s.cancels, sess.ID)
+			s.cancelMu.Unlock()
+		}()
 		if _, err := s.agent.Run(ctx, sess, req.Task); err != nil {
 			s.broker.Publish(logging.Event{
 				Type:      "error",
 				SessionID: sess.ID,
+				Data:      map[string]any{"error": err.Error()},
+			})
+			// The UI resets its "running" state on agent_finished; every
+			// error exit must emit one or the client spins forever.
+			s.broker.Publish(logging.Event{
+				Type:      "agent_finished",
+				SessionID: sess.ID,
+				Success:   boolPtr(false),
 				Data:      map[string]any{"error": err.Error()},
 			})
 		}
@@ -227,8 +256,29 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, map[string]string{"session_id": sess.ID})
 }
 
+// handleCancelTask aborts a running task. Cancelling the task context also
+// unblocks (rejects) any approval it is waiting on, since BrokerApprover
+// waits on the same context.
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.cancelMu.Lock()
+	cancel, ok := s.cancels[id]
+	s.cancelMu.Unlock()
+	if !ok {
+		writeErr(w, 404, "no running task for session %q", id)
+		return
+	}
+	cancel()
+	writeJSON(w, 200, map[string]bool{"cancelled": true})
+}
+
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, s.store.List())
+	sessions := s.store.List()
+	snapshots := make([]*session.Session, len(sessions))
+	for i, sess := range sessions {
+		snapshots[i] = sess.Snapshot()
+	}
+	writeJSON(w, 200, snapshots)
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +287,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "unknown session %q", r.PathValue("id"))
 		return
 	}
-	writeJSON(w, 200, sess)
+	writeJSON(w, 200, sess.Snapshot())
 }
 
 // handleEvents streams all agent events as Server-Sent Events.
@@ -265,10 +315,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
 
+	// Comment-line heartbeats keep proxies and browsers from silently
+	// dropping the idle connection; they carry no event data.
+	heartbeat := time.NewTicker(s.sseHeartbeat)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		case e, open := <-events:
 			if !open {
 				return
@@ -301,6 +359,12 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"resolved": true})
+}
+
+// handleListApprovals returns all pending approval requests, so a client
+// that (re)connected after the SSE broadcast can recover them.
+func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.approver.ListPending())
 }
 
 // handleGetApproval returns the full pending approval request (including the

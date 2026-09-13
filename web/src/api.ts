@@ -98,6 +98,7 @@ export const api = {
   getSession: (id: string) => req<Session>("GET", `/api/sessions/${id}`),
   getApproval: (id: string) =>
     req<ApprovalRequest>("GET", `/api/approvals/${encodeURIComponent(id)}`),
+  listApprovals: () => req<ApprovalRequest[]>("GET", "/api/approvals"),
   gitStatus: () => req<{ status: string }>("GET", "/api/git/status"),
   gitDiff: () => req<{ diff: string }>("GET", "/api/git/diff"),
   files: (path: string) =>

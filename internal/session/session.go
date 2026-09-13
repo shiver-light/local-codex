@@ -84,6 +84,40 @@ func (s *Session) Finish(answer string) {
 	s.mu.Unlock()
 }
 
+// Snapshot returns a deep copy of the session taken under the lock. Readers
+// (e.g. HTTP handlers marshaling to JSON) must use it instead of touching
+// the live session, which the agent goroutine mutates concurrently.
+func (s *Session) Snapshot() *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := &Session{
+		ID:          s.ID,
+		Task:        s.Task,
+		CreatedAt:   s.CreatedAt,
+		FinalAnswer: s.FinalAnswer,
+		Done:        s.Done,
+	}
+	if s.Messages != nil {
+		out.Messages = make([]llm.Message, len(s.Messages))
+		for i, m := range s.Messages {
+			out.Messages[i] = m
+			if m.ToolCalls != nil {
+				out.Messages[i].ToolCalls = append([]llm.ToolCall(nil), m.ToolCalls...)
+			}
+		}
+	}
+	if s.ToolHistory != nil {
+		out.ToolHistory = append([]ToolRecord(nil), s.ToolHistory...)
+	}
+	if s.ModifiedFiles != nil {
+		out.ModifiedFiles = append([]string(nil), s.ModifiedFiles...)
+	}
+	if s.Commands != nil {
+		out.Commands = append([]string(nil), s.Commands...)
+	}
+	return out
+}
+
 // Store persists sessions.
 type Store interface {
 	Create(task string) *Session
